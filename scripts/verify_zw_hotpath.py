@@ -26,9 +26,14 @@ REQUIRED = [
     "platform_i2c_write",
     "vqf_sample_step",
     "vqf_run_1khz",
+    "platform_uart_write_bytes",
+    "platform_uart_send_euler_bin",
+    "platform_can_send_euler",
+    "atan2f",
+    "asinf",
 ]
 
-HOT_FUNCS = ("updateGyr", "updateAcc", "vqf_sample_step", "filterVec", "quatMultiply", "quatRotate", "norm", "normalize", "matrix3Multiply", "sinf", "_sinf", "cosf", "_cosf", "sqrt", "acos", "__kernel_sinf", "__kernel_cosf", "__rem_pio2f")
+HOT_FUNCS = ("updateGyr", "updateAcc", "vqf_sample_step", "vqf_run_1khz", "filterVec", "quatMultiply", "quatRotate", "norm", "normalize", "matrix3Multiply", "sinf", "_sinf", "cosf", "_cosf", "sqrt", "acos", "asinf", "atan2f", "atanf", "__kernel_sinf", "__kernel_cosf", "__rem_pio2f", "platform_uart_write_bytes", "platform_uart_send_euler_bin", "platform_can_send_euler")
 
 
 def run(cmd: list[str]) -> str:

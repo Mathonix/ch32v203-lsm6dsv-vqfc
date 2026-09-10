@@ -1,15 +1,16 @@
 /**
  * CH32V203G6U6 + LSM6DSV + VQF-C (dusking1/vqf-c full VQF) demo
  * - I2C1: PB6=SCL, PB7=SDA, LSM6DSV @ 0x6A (SA0=GND)
- * - USART1: PA9=TX @ 115200 for printf debug
+ * - USART1: PA9=TX @ 921600 binary Euler @ 1 kHz (+ boot banner via printf)
+ * - CAN1: PA11=RX, PA12=TX @ 1 Mbit, std ID 0x321, Euler millideg @ 1 kHz
  * - 6DOF only: no magnetometer; initVqf(..., magTs=5.0f), never call updateMag
  *
  * Units (VQF / Laidig–Seel): gyroscope rad/s, accelerometer m/s².
  * LSM6DSV driver already converts to those SI units.
  *
  * Sample rate: LSM6DSV HAODR true 1000 Hz → gyrTs = accTs = 1/1000 s.
- * Hot path (vqf_sample_step + VQF updateGyr/updateAcc callees) lives in
- * zero-wait Flash (.text.hot / .text_zw, addresses < 0x8000).
+ * Hot path (sample + Euler + UART binary + CAN TX) lives in zero-wait Flash
+ * (.text.hot / .text_zw, addresses < 0x8000).
  */
 #include "platform.h"
 #include "flash_nzw.h"
@@ -20,8 +21,12 @@
 #include <math.h>
 #include <stdint.h>
 
-/** Quaternion (w,x,y,z) → roll/pitch/yaw in degrees (aerospace ZYX). NZW. */
-FLASH_NZW static void quat_to_euler_deg(const float q[4], float *roll, float *pitch, float *yaw)
+#ifndef VQF_UART_ASCII_DEBUG
+#define VQF_UART_ASCII_DEBUG 0
+#endif
+
+/** Quaternion (w,x,y,z) → roll/pitch/yaw in degrees (aerospace ZYX). ZW. */
+FLASH_ZW static void quat_to_euler_deg(const float q[4], float *roll, float *pitch, float *yaw)
 {
     const float rad2deg = 57.2957795f; /* 180/pi; avoid M_PI for newlib-nano */
     const float w = q[0], x = q[1], y = q[2], z = q[3];
@@ -42,17 +47,18 @@ FLASH_NZW static void quat_to_euler_deg(const float q[4], float *roll, float *pi
     *yaw = atan2f(siny_cosp, cosy_cosp) * rad2deg;
 }
 
-/** Low-rate UART status (NZW — must not run on the 1 kHz hot path). */
+#if VQF_UART_ASCII_DEBUG
+/** Optional low-rate ASCII (NZW) — off by default; printf cannot sustain 1 kHz. */
 FLASH_NZW static void vqf_uart_print_status(const float q[4])
 {
     float roll, pitch, yaw;
     quat_to_euler_deg(q, &roll, &pitch, &yaw);
-    /* Euler primary (deg, ZYX); quat secondary for debug */
     platform_uart_printf(
         "roll=%.2f pitch=%.2f yaw=%.2f | q=%.4f,%.4f,%.4f,%.4f\n",
         (double)roll, (double)pitch, (double)yaw,
         (double)q[0], (double)q[1], (double)q[2], (double)q[3]);
 }
+#endif
 
 /**
  * 1 kHz hot body in zero-wait Flash: IMU read → updateGyr → updateAcc → getQuat6D.
@@ -73,16 +79,19 @@ FLASH_ZW int vqf_sample_step(lsm6dsv_t *imu, float q_out[4])
 }
 
 /**
- * Forever 1 kHz sample loop — entire function in ZW so the cadence path
- * never executes from NZW. UART print is delegated to NZW at ~20 Hz.
+ * Forever 1 kHz sample loop — entire function in ZW.
+ * Each sample: Euler → UART binary packet + CAN frame.
  */
 FLASH_ZW void vqf_run_1khz(lsm6dsv_t *imu)
 {
     uint32_t last_ms = platform_millis();
-    uint32_t last_print = last_ms;
     const uint32_t sample_period_ms = 1u; /* 1000 Hz wall-clock cadence */
-    const uint32_t print_period_ms = 50u; /* ~20 Hz UART */
     float q[4];
+    uint16_t seq = 0u;
+#if VQF_UART_ASCII_DEBUG
+    uint32_t last_print = last_ms;
+    const uint32_t print_period_ms = 50u;
+#endif
 
     while (1) {
         uint32_t now = platform_millis();
@@ -92,15 +101,22 @@ FLASH_ZW void vqf_run_1khz(lsm6dsv_t *imu)
         last_ms = now;
 
         if (vqf_sample_step(imu, q) != 0) {
-            /* Avoid printf on the hot path; brief back-off only */
             platform_delay_ms(1);
             continue;
         }
 
+        float roll, pitch, yaw;
+        quat_to_euler_deg(q, &roll, &pitch, &yaw);
+        (void)platform_uart_send_euler_bin(seq, roll, pitch, yaw);
+        (void)platform_can_send_euler(seq, roll, pitch, yaw);
+        seq++;
+
+#if VQF_UART_ASCII_DEBUG
         if ((uint32_t)(now - last_print) >= print_period_ms) {
             last_print = now;
             vqf_uart_print_status(q);
         }
+#endif
     }
 }
 
@@ -108,7 +124,11 @@ FLASH_NZW int main(void)
 {
     platform_init();
     platform_uart_printf("\nCH32V203 + LSM6DSV + VQF-C (6DOF, 1 kHz ZW)\n");
-    platform_uart_printf("I2C1 PB6/PB7, USART1 PA9, IMU addr 0x6A\n");
+    platform_uart_printf("I2C1 PB6/PB7, USART1 PA9 @ %u baud binary Euler\n",
+                         (unsigned)PLATFORM_UART_BAUD);
+    platform_uart_printf("CAN1 PA11/PA12 @ %u bit/s, std ID 0x%03X (transceiver req.)\n",
+                         (unsigned)PLATFORM_CAN_BITRATE, (unsigned)PLATFORM_CAN_STD_ID);
+    platform_uart_printf("USBD off (CAN shares SRAM). Packet: see README.\n");
 
     lsm6dsv_t imu;
     int rc = lsm6dsv_init(&imu, LSM6DSV_I2C_ADDR_SA0_L);
@@ -135,7 +155,7 @@ FLASH_NZW int main(void)
     initVqf(gyrTs, accTs, magTs);
     platform_uart_printf("VQF init: gyrTs=accTs=1/%.0f, magTs=5.0 (no mag)\n",
                          (double)LSM6DSV_ODR_HZ);
-    platform_uart_printf("Hot path ZW (<0x8000); UART Euler ~20 Hz on USART1 PA9 115200\n");
+    platform_uart_printf("Hot path ZW: sample+euler+uart_bin+can_tx @ 1 kHz\n");
 
     /* Never return — 1 kHz loop executes from FLASH_ZW */
     vqf_run_1khz(&imu);

@@ -129,4 +129,37 @@
 #define HSI_VALUE       8000000u
 #endif
 
+/* ---- CAN1 (bxCAN-like, shares 512B SRAM with USBD — leave USBD off) ---- */
+#define CAN1_BASE       0x40006400u
+#define CAN1_CTLR       REG32(CAN1_BASE + 0x00)   /* MCR */
+#define CAN1_STATR      REG32(CAN1_BASE + 0x04)   /* MSR */
+#define CAN1_TSTATR     REG32(CAN1_BASE + 0x08)   /* TSR */
+#define CAN1_BTIMR      REG32(CAN1_BASE + 0x1C)   /* BTR */
+#define CAN1_TXMIR0     REG32(CAN1_BASE + 0x180)
+#define CAN1_TXMDTR0    REG32(CAN1_BASE + 0x184)
+#define CAN1_TXMDLR0    REG32(CAN1_BASE + 0x188)
+#define CAN1_TXMDHR0    REG32(CAN1_BASE + 0x18C)
+#define CAN1_FCTLR      REG32(CAN1_BASE + 0x200)  /* FMR */
+#define CAN1_FMCFGR     REG32(CAN1_BASE + 0x204)  /* FM1R */
+#define CAN1_FSCFGR     REG32(CAN1_BASE + 0x20C)  /* FS1R */
+#define CAN1_FAFIFOR    REG32(CAN1_BASE + 0x214)  /* FFA1R */
+#define CAN1_FWR        REG32(CAN1_BASE + 0x21C)  /* FA1R */
+#define CAN1_F0R1       REG32(CAN1_BASE + 0x240)
+#define CAN1_F0R2       REG32(CAN1_BASE + 0x244)
+
+#define RCC_CAN1EN      (1u << 25) /* APB1 */
+
+#define CAN_CTLR_INRQ   (1u << 0)
+#define CAN_CTLR_SLEEP  (1u << 1)
+#define CAN_CTLR_NART   (1u << 4)
+#define CAN_CTLR_ABOM   (1u << 6)
+#define CAN_STATR_INAK  (1u << 0)
+#define CAN_STATR_SLAK  (1u << 1)
+#define CAN_TSTATR_TME0 (1u << 26)
+#define CAN_TXMIR_TXRQ  (1u << 0)
+#define CAN_FCTLR_FINIT (1u << 0)
+
+/* AFIO PCFR1 CAN remap: 00 = PA11 RX / PA12 TX */
+#define AFIO_CAN_REMAP_MASK (3u << 13)
+
 #endif /* CH32V203_REGS_H */

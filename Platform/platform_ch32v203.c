@@ -4,11 +4,13 @@
 #include "platform.h"
 #include "ch32v203_regs.h"
 #include "flash_nzw.h"
+#include "flash_zw.h"
 
 #include <stdio.h>
 #include <string.h>
 
 uint32_t SystemCoreClock = HSI_VALUE;
+volatile uint32_t platform_can_drop_count = 0u;
 
 /* Weak SystemInit called from startup before main. */
 void SystemInit(void);
@@ -296,6 +298,160 @@ int platform_i2c_read(uint8_t addr7, uint8_t reg, uint8_t *data, uint16_t len)
     return 0;
 }
 
+/* ---- UART binary TX (ZW hot path) ---- */
+
+FLASH_ZW void platform_uart_write_bytes(const uint8_t *p, unsigned n)
+{
+    if (p == NULL) {
+        return;
+    }
+    for (unsigned i = 0; i < n; i++) {
+        while ((USART1_STATR & USART_TXE) == 0u) {
+        }
+        USART1_DATAR = (uint16_t)p[i];
+    }
+}
+
+FLASH_ZW unsigned platform_uart_send_euler_bin(uint16_t seq, float roll_deg,
+                                               float pitch_deg, float yaw_deg)
+{
+    uint8_t pkt[17];
+    pkt[0] = 0xA5u;
+    pkt[1] = 0x5Au;
+    pkt[2] = (uint8_t)(seq & 0xFFu);
+    pkt[3] = (uint8_t)((seq >> 8) & 0xFFu);
+    union {
+        float f;
+        uint8_t b[4];
+    } u;
+    u.f = roll_deg;
+    pkt[4] = u.b[0];
+    pkt[5] = u.b[1];
+    pkt[6] = u.b[2];
+    pkt[7] = u.b[3];
+    u.f = pitch_deg;
+    pkt[8] = u.b[0];
+    pkt[9] = u.b[1];
+    pkt[10] = u.b[2];
+    pkt[11] = u.b[3];
+    u.f = yaw_deg;
+    pkt[12] = u.b[0];
+    pkt[13] = u.b[1];
+    pkt[14] = u.b[2];
+    pkt[15] = u.b[3];
+    uint8_t x = 0u;
+    for (unsigned i = 0; i < 16u; i++) {
+        x ^= pkt[i];
+    }
+    pkt[16] = x;
+    platform_uart_write_bytes(pkt, 17u);
+    return 17u;
+}
+
+/* ---- CAN1 init (NZW) + TX (ZW) ---- */
+
+FLASH_NZW static void can1_init(void)
+{
+    /*
+     * Default pins: PA11=CAN_RX (in pull-up), PA12=CAN_TX (AF PP).
+     * Remap cleared → Remap1. USBD left off (shares 512B SRAM with CAN).
+     *
+     * Bitrate: APB1 = SystemCoreClock/2 = 72 MHz.
+     * BTR: BRP=6, TS1=8, TS2=3 → 72e6/(6*(1+8+3))=1 Mbit, sample ≈ 75%.
+     * Register fields store (value - 1).
+     */
+    RCC_APB2PCENR |= RCC_IOPAEN | RCC_AFIOEN;
+    RCC_APB1PCENR |= RCC_CAN1EN;
+
+    AFIO_PCFR1 &= ~AFIO_CAN_REMAP_MASK; /* PA11/PA12 */
+
+    gpio_set_mode_high(GPIOA_BASE, 11u, GPIO_MODE_IN_PU);
+    GPIO_OUTDR(GPIOA_BASE) |= (1u << 11);
+    gpio_set_mode_high(GPIOA_BASE, 12u, GPIO_MODE_AF_PP_50);
+
+    /* Exit sleep, enter init */
+    CAN1_CTLR &= ~CAN_CTLR_SLEEP;
+    {
+        uint32_t t = 100000u;
+        while ((CAN1_STATR & CAN_STATR_SLAK) != 0u && t--) {
+        }
+    }
+    CAN1_CTLR |= CAN_CTLR_INRQ;
+    {
+        uint32_t t = 100000u;
+        while ((CAN1_STATR & CAN_STATR_INAK) == 0u && t--) {
+        }
+    }
+
+    /* ABOM + NART (no auto-retransmit — drop on bus error rather than stall) */
+    CAN1_CTLR |= CAN_CTLR_ABOM | CAN_CTLR_NART;
+
+#if PLATFORM_CAN_BITRATE == 1000000u
+    /* BRP=6→5, TS1=8→7, TS2=3→2, SJW=1→0 */
+    CAN1_BTIMR = (0u << 24) | (2u << 20) | (7u << 16) | 5u;
+#else
+#error "Only PLATFORM_CAN_BITRATE 1000000 supported in this build; adjust BTIMR"
+#endif
+
+    /* Filters: accept-all (TX-only still needs FINIT leave for clean leave-init) */
+    CAN1_FCTLR |= CAN_FCTLR_FINIT;
+    CAN1_FMCFGR &= ~1u;          /* mask mode filter 0 */
+    CAN1_FSCFGR |= 1u;           /* 32-bit scale */
+    CAN1_FAFIFOR &= ~1u;         /* FIFO0 */
+    CAN1_F0R1 = 0u;
+    CAN1_F0R2 = 0u;              /* mask 0 = accept all */
+    CAN1_FWR |= 1u;              /* activate filter 0 */
+    CAN1_FCTLR &= ~CAN_FCTLR_FINIT;
+
+    /* Leave init mode */
+    CAN1_CTLR &= ~CAN_CTLR_INRQ;
+    {
+        uint32_t t = 100000u;
+        while ((CAN1_STATR & CAN_STATR_INAK) != 0u && t--) {
+        }
+    }
+}
+
+FLASH_ZW static int16_t millideg_i16(float deg)
+{
+    float md = deg * 1000.0f;
+    if (md > 32767.0f) {
+        md = 32767.0f;
+    } else if (md < -32768.0f) {
+        md = -32768.0f;
+    }
+    return (int16_t)md;
+}
+
+FLASH_ZW int platform_can_send_euler(uint16_t seq, float roll_deg, float pitch_deg,
+                                     float yaw_deg)
+{
+    /* Brief poll only — never spin forever on the 1 kHz path */
+    unsigned spins = 2u;
+    while ((CAN1_TSTATR & CAN_TSTATR_TME0) == 0u) {
+        if (spins == 0u) {
+            platform_can_drop_count++;
+            return -1;
+        }
+        spins--;
+    }
+
+    int16_t r = millideg_i16(roll_deg);
+    int16_t p = millideg_i16(pitch_deg);
+    int16_t y = millideg_i16(yaw_deg);
+
+    /* Std ID in STID[10:0] at bits 31:21; IDE=RTR=0; TXRQ set last via OR */
+    uint32_t id = ((uint32_t)(PLATFORM_CAN_STD_ID & 0x7FFu) << 21);
+    CAN1_TXMDTR0 = 8u; /* DLC=8 */
+    /* LE: roll_i16, pitch_i16 | yaw_i16, seq_u16 */
+    CAN1_TXMDLR0 = ((uint32_t)(uint16_t)r) |
+                   ((uint32_t)(uint16_t)p << 16);
+    CAN1_TXMDHR0 = ((uint32_t)(uint16_t)y) |
+                   ((uint32_t)seq << 16);
+    CAN1_TXMIR0 = id | CAN_TXMIR_TXRQ;
+    return 0;
+}
+
 FLASH_NZW void platform_init(void)
 {
     /* SystemInit already ran from reset; re-assert clock var. */
@@ -303,6 +459,7 @@ FLASH_NZW void platform_init(void)
         SystemInit();
     }
     systick_init();
-    usart1_init(115200u);
+    usart1_init(PLATFORM_UART_BAUD);
     i2c1_init();
+    can1_init();
 }

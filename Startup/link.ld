@@ -12,7 +12,7 @@
  *     FULL VQF 1 kHz hot call graph + IMU/I2C/timebase + soft-float/libm
  *     needed by updateGyr/updateAcc, plus .text.hot (vqf_sample_step).
  *   FLASH_NZW (192K):
- *     cold VQF (init/mag/setters), printf/euler/main shell, remaining libc
+ *     cold VQF (init/mag/setters), printf/main shell, remaining libc
  *
  * Note: this toolchain's ld (binutils 2.44) rejects MEMORY region-list
  * overflow (`>FLASH FLASH_NZW`); we place explicitly instead.
@@ -133,11 +133,15 @@ SECTIONS
     */*/vqf.o(.text .text.*)
     */*/*/vqf.o(.text .text.*)
 
-    /* IMU / I2C / timebase (high-rate) */
+    /* IMU / I2C / timebase / UART binary / CAN TX (high-rate) */
     *(.text.lsm6dsv_read*)
     *(.text.platform_i2c*)
     *(.text.platform_millis*)
     *(.text.platform_delay*)
+    *(.text.platform_uart_write_bytes*)
+    *(.text.platform_uart_send_euler*)
+    *(.text.platform_can_send*)
+    *(.text.millideg_i16*)
     *(.text.systick*)
 
     /*
@@ -174,6 +178,9 @@ SECTIONS
     *libc.a:*libm_machine_riscv_sf_sqrt*(.text*)
     *libc.a:*libm_math_s_acos*(.text*)
     *libc.a:*libm_math_sf_asin*(.text*)
+    *libc.a:*libm_math_sf_atan2*(.text*)
+    *libc.a:*libm_math_sf_atan*(.text*)
+    *libc.a:*libm_math_s_atan*(.text*)
     *libc.a:*libm_math_sf_sin*(.text*)
     *libc.a:*libm_math_sf_cos*(.text*)
     *libc.a:*libm_math_k_sin*(.text*)
@@ -192,6 +199,9 @@ SECTIONS
     /* Also match via libm.a if the toolchain splits math out of libc */
     *libm.a:*sqrt*(.text*)
     *libm.a:*acos*(.text*)
+    *libm.a:*asin*(.text*)
+    *libm.a:*atan2*(.text*)
+    *libm.a:*atan*(.text*)
     *libm.a:*sin*(.text*)
     *libm.a:*cos*(.text*)
     *libm.a:*isnan*(.text*)
