@@ -1,4 +1,4 @@
-# CH32V203G6U6 + LSM6DSV + VQFC — GCC Makefile
+# CH32V203G6U6 + LSM6DSV + VQF-C — GCC Makefile
 # Toolchain: xPack / MRS riscv-none-elf-gcc or riscv-none-embed-gcc
 #
 #   make            # build build/firmware.elf
@@ -6,6 +6,11 @@
 #
 # MRS path: create a CH32V203 project, add User/Sensors/Middleware/Platform
 # sources, use Startup/link.ld (32K/10K). SPL not required for this Makefile.
+#
+# Flash note: Middleware/vqf-c/vqf.c is a full VQF (~39 KB source). On the
+# CH32V203G6U6 (32 KB Flash) the linked image may exceed Flash; keep -Os,
+# --gc-sections, and nano.specs. If oversized, measure with `make size` and
+# consider a larger Flash CH32V203 variant or a size-reduced VQF build.
 
 TARGET   ?= firmware
 BUILD    ?= build
@@ -32,7 +37,7 @@ INCLUDES := \
   -IUser \
   -IPlatform \
   -ISensors/lsm6dsv \
-  -IMiddleware/vqfc
+  -IMiddleware/vqf-c
 
 CFLAGS   := $(MCUFLAGS) $(DEFS) $(INCLUDES) -Os -g3 -Wall -Wextra
 CFLAGS   += -Wno-unused-parameter
@@ -47,7 +52,7 @@ C_SRCS := \
   User/ch32v20x_it.c \
   Platform/platform_ch32v203.c \
   Sensors/lsm6dsv/lsm6dsv.c \
-  Middleware/vqfc/vqfc.c
+  Middleware/vqf-c/vqf.c
 
 AS_SRCS := Startup/startup_ch32v20x_D6.S
 

@@ -1,18 +1,46 @@
 /**
- * CH32V203G6U6 + LSM6DSV + VQFC demo
+ * CH32V203G6U6 + LSM6DSV + VQF-C (dusking1/vqf-c full VQF) demo
  * - I2C1: PB6=SCL, PB7=SDA, LSM6DSV @ 0x6A (SA0=GND)
  * - USART1: PA9=TX @ 115200 for printf debug
+ * - 6DOF only: no magnetometer; initVqf(..., magTs=5.0f), never call updateMag
+ *
+ * Units (VQF / Laidig–Seel): gyroscope rad/s, accelerometer m/s².
+ * LSM6DSV driver already converts to those SI units.
+ * Sample period matches LSM6DSV ODR 120 Hz → gyrTs = accTs = 1/120 s.
  */
 #include "platform.h"
 #include "lsm6dsv.h"
-#include "vqfc.h"
+#include "vqf.h"
 
+#include <math.h>
 #include <stdint.h>
+
+/** Quaternion (w,x,y,z) → roll/pitch/yaw in degrees (aerospace ZYX). */
+static void quat_to_euler_deg(const float q[4], float *roll, float *pitch, float *yaw)
+{
+    const float rad2deg = 57.2957795f; /* 180/pi; avoid M_PI for newlib-nano */
+    const float w = q[0], x = q[1], y = q[2], z = q[3];
+    const float sinr_cosp = 2.0f * (w * x + y * z);
+    const float cosr_cosp = 1.0f - 2.0f * (x * x + y * y);
+    *roll = atan2f(sinr_cosp, cosr_cosp) * rad2deg;
+
+    float sinp = 2.0f * (w * y - z * x);
+    if (sinp > 1.0f) {
+        sinp = 1.0f;
+    } else if (sinp < -1.0f) {
+        sinp = -1.0f;
+    }
+    *pitch = asinf(sinp) * rad2deg;
+
+    const float siny_cosp = 2.0f * (w * z + x * y);
+    const float cosy_cosp = 1.0f - 2.0f * (y * y + z * z);
+    *yaw = atan2f(siny_cosp, cosy_cosp) * rad2deg;
+}
 
 int main(void)
 {
     platform_init();
-    platform_uart_printf("\nCH32V203 + LSM6DSV + VQFC\n");
+    platform_uart_printf("\nCH32V203 + LSM6DSV + VQF-C (6DOF)\n");
     platform_uart_printf("I2C1 PB6/PB7, USART1 PA9, IMU addr 0x6A\n");
 
     lsm6dsv_t imu;
@@ -32,23 +60,23 @@ int main(void)
     }
     platform_uart_printf("LSM6DSV OK (WHO_AM_I=0x%02X)\n", LSM6DSV_WHO_AM_I_VALUE);
 
-    vqfc_t filter;
-    vqfc_init(&filter);
+    /* Match LSM6DSV ODR_AT_120Hz; large magTs + no updateMag => 6DOF mode */
+    const float gyrTs = 1.0f / 120.0f;
+    const float accTs = 1.0f / 120.0f;
+    const float magTs = 5.0f;
+    initVqf(gyrTs, accTs, magTs);
+    platform_uart_printf("VQF init: gyrTs=accTs=1/120, magTs=5.0 (no mag)\n");
 
     uint32_t last_ms = platform_millis();
     uint32_t last_print = last_ms;
-    const float dt_nom = 1.0f / 120.0f;
+    const uint32_t sample_period_ms = 8u; /* ~120 Hz */
 
     while (1) {
         uint32_t now = platform_millis();
-        float dt = (float)(now - last_ms) * 0.001f;
-        if (dt < 0.001f) {
-            continue; /* wait ~1 ms */
+        if ((uint32_t)(now - last_ms) < sample_period_ms) {
+            continue;
         }
         last_ms = now;
-        if (dt > 0.05f) {
-            dt = dt_nom;
-        }
 
         float acc[3], gyr[3];
         if (lsm6dsv_read_acc_gyr(&imu, acc, gyr) != 0) {
@@ -57,14 +85,17 @@ int main(void)
             continue;
         }
 
-        vqfc_update(&filter, gyr, acc, dt);
+        /* SI units from driver: gyr rad/s, acc m/s² — as required by VQF */
+        updateGyr(gyr);
+        updateAcc(acc);
+        /* 6DOF: do not call updateMag */
 
         if ((uint32_t)(now - last_print) >= 100u) {
             last_print = now;
             float q[4];
             float roll, pitch, yaw;
-            vqfc_get_quat(&filter, q);
-            vqfc_get_euler_deg(&filter, &roll, &pitch, &yaw);
+            getQuat6D(q);
+            quat_to_euler_deg(q, &roll, &pitch, &yaw);
             platform_uart_printf(
                 "q=%.4f,%.4f,%.4f,%.4f  rpy=%.1f,%.1f,%.1f\n",
                 (double)q[0], (double)q[1], (double)q[2], (double)q[3],

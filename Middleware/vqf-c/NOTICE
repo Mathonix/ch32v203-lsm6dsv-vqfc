@@ -1,0 +1,22 @@
+Third-party: Middleware/vqf-c/
+================================
+Vendored from https://github.com/DusKing1/vqf-c (MIT License)
+Copyright (c) 2024 Hugo Chiang
+
+Full VQF C port of the algorithm by Daniel Laidig and Thomas Seel:
+  https://github.com/dlaidig/vqf
+  D. Laidig and T. Seel, "VQF: Highly Accurate IMU Orientation Estimation
+  with Bias Estimation and Magnetic Disturbance Rejection," Information
+  Fusion, 2023. doi:10.1016/j.inffus.2022.10.014
+
+Files: vqf.c, vqf.h, LICENSE (upstream), README.upstream.md
+
+Local adaptations in this tree:
+  - initVqf() calls init_params() (upstream omitted this; params would stay BSS-zero)
+  - added #include <string.h> / <stddef.h> for memcpy / size_t
+  - define cos_fast/sin_fast/tan_fast → cosf/sinf/tanf (upstream undeclared)
+  - remove OOB resetState loop writing 18 into restLastGyrLp[3]
+  - restLastSquaredDeviations fill count 3→2 (array is [2])
+
+Do not call updateMag() in 6DOF-only builds; pass a large magTs (e.g. 5.0f)
+to initVqf as shown in the upstream README.

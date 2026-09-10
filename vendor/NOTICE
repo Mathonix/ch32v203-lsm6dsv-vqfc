@@ -4,8 +4,14 @@ vendor/mtkos-ch32v203-minimal/ — MIT License, Copyright (c) 2024 mtkos
   Source: https://github.com/mtkos/ch32v203-minimal
   Used for: thin register address headers (GPIO/RCC/UART/SysTick patterns) and reference.
 
-Application, Sensors/, Middleware/, Platform/, Startup/, and User/ code in this
-repository is original to this project (see root LICENSE).
+Middleware/vqf-c/ — MIT License, Copyright (c) 2024 Hugo Chiang
+  Source: https://github.com/DusKing1/vqf-c
+  Algorithm: Daniel Laidig & Thomas Seel — https://github.com/dlaidig/vqf
+  See Middleware/vqf-c/NOTICE and Middleware/vqf-c/LICENSE.
+
+Application, Sensors/, Platform/, Startup/, and User/ code in this
+repository is original to this project (see root LICENSE), aside from
+vendored Middleware/vqf-c above.
 
 WCH CH32V20x SPL is NOT vendored here (WCH proprietary notice for their MCU SDK).
 Import Peripheral library from MounRiver Studio packs when building an MRS project,
