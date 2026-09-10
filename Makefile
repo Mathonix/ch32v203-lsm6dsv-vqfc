@@ -15,10 +15,19 @@
 TARGET   ?= firmware
 BUILD    ?= build
 
-# Prefer newer xPack name, fall back to MRS embed toolchain
+# Prefer xPack / MRS names, then Debian/Ubuntu riscv64-unknown-elf
 PREFIX   ?= riscv-none-elf-
 ifeq ($(shell which $(PREFIX)gcc 2>/dev/null),)
   PREFIX := riscv-none-embed-
+endif
+ifeq ($(shell which $(PREFIX)gcc 2>/dev/null),)
+  PREFIX := riscv64-unknown-elf-
+endif
+
+# Debian gcc-riscv64-unknown-elf ships picolibc (no nano.specs)
+SPECS := --specs=nano.specs --specs=nosys.specs
+ifeq ($(PREFIX),riscv64-unknown-elf-)
+  SPECS := --specs=picolibc.specs
 endif
 
 CC       := $(PREFIX)gcc
@@ -42,9 +51,11 @@ INCLUDES := \
 CFLAGS   := $(MCUFLAGS) $(DEFS) $(INCLUDES) -Os -g3 -Wall -Wextra
 CFLAGS   += -Wno-unused-parameter
 ASFLAGS  := $(MCUFLAGS) $(DEFS) -g3
+CFLAGS   += $(SPECS)
+ASFLAGS  += $(SPECS)
 LDFLAGS  := $(MCUFLAGS) -T Startup/link.ld -nostartfiles
 LDFLAGS  += -Wl,--gc-sections -Wl,-Map,$(BUILD)/$(TARGET).map
-LDFLAGS  += --specs=nano.specs --specs=nosys.specs -lm
+LDFLAGS  += $(SPECS) -lm
 
 C_SRCS := \
   User/main.c \

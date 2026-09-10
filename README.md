@@ -126,3 +126,19 @@ LSM6DSV 寄存器与 WHO_AM_I 参考 ST 公开资料（lsm6dsv-pid / 数据手�
 ## 许可
 
 本仓库应用代码：MIT（见 `LICENSE`）。`Middleware/vqf-c/` 遵循其上游 MIT（Hugo Chiang）；芯片厂商 SPL 与 ST 驱动头文件各自遵循原许可证。
+
+## 实测体积（本机交叉编译）
+
+工具链：`riscv64-unknown-elf-gcc` 14.2（Debian/Ubuntu apt）+ picolibc，`-Os -ffunction-sections -fdata-sections --gc-sections`，`rv32imac_zicsr` / `ilp32`。
+
+| 项 | 数值 |
+|---|---|
+| Flash（text+data） | **39288 B（≈ 38.4 KB）** |
+| CH32V203G6U6 Flash 上限 | 32768 B（32 KB） |
+| 超出 | **6520 B** |
+| RAM（data+bss，含 1 KB 栈） | **1608 B** / 10 KB |
+| `.bin` | 39288 B |
+
+结论：**完整 `dusking1/vqf-c` + soft-float + printf 无法装进 G6U6 的 32 KB Flash**；RAM 充足。更大容量型号（例如 ≥64 KB Flash 的 CH32V203）可直接用；若必须留在 G6，需裁剪 printf、改用 basic VQF，或换更小滤波。
+
+
