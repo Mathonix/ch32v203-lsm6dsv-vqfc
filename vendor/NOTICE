@@ -1,0 +1,12 @@
+Third-party notice
+==================
+vendor/mtkos-ch32v203-minimal/ — MIT License, Copyright (c) 2024 mtkos
+  Source: https://github.com/mtkos/ch32v203-minimal
+  Used for: thin register address headers (GPIO/RCC/UART/SysTick patterns) and reference.
+
+Application, Sensors/, Middleware/, Platform/, Startup/, and User/ code in this
+repository is original to this project (see root LICENSE).
+
+WCH CH32V20x SPL is NOT vendored here (WCH proprietary notice for their MCU SDK).
+Import Peripheral library from MounRiver Studio packs when building an MRS project,
+or rely on the self-contained Platform/ register-level HAL + Makefile.
