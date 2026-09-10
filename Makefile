@@ -8,8 +8,9 @@
 # sources, use Startup/link.ld (32K ZW + 192K NZW / 10K RAM). SPL not required for this Makefile.
 #
 # Flash: G6U6 R0WAIT=32KB zero-wait + ~192KB non-zero-wait (total CodeFlash 224KB).
-# Startup/link.ld places vectors/reset/SystemInit/hot path in FLASH (ZW) and
-# cold/init + VQF bulk + libc in FLASH_NZW @ 0x8000. See README NZW section.
+# Startup/link.ld places vectors/reset/SystemInit + FULL VQF 1 kHz hot call graph
+# (updateGyr/updateAcc + callees + soft-float/libm) in FLASH (ZW < 0x8000).
+# Cold VQF (init/mag/setters) + printf/euler in FLASH_NZW @ 0x8000.
 
 TARGET   ?= firmware
 BUILD    ?= build
@@ -48,6 +49,7 @@ INCLUDES := \
   -IMiddleware/vqf-c
 
 CFLAGS   := $(MCUFLAGS) $(DEFS) $(INCLUDES) -Os -g3 -Wall -Wextra
+CFLAGS   += -fno-math-errno
 CFLAGS   += -Wno-unused-parameter
 ASFLAGS  := $(MCUFLAGS) $(DEFS) -g3
 CFLAGS   += $(SPECS)
@@ -68,7 +70,7 @@ AS_SRCS := Startup/startup_ch32v20x_D6.S
 
 OBJS := $(addprefix $(BUILD)/,$(C_SRCS:.c=.o) $(AS_SRCS:.S=.o))
 
-.PHONY: all clean flash size tree
+.PHONY: all clean flash size tree verify-zw
 
 all: $(BUILD)/$(TARGET).elf $(BUILD)/$(TARGET).hex $(BUILD)/$(TARGET).bin size
 
@@ -103,3 +105,7 @@ tree:
 OPENOCD ?= openocd
 flash: $(BUILD)/$(TARGET).elf
 	$(OPENOCD) -f wch-riscv.cfg -c "program $(BUILD)/$(TARGET).elf verify reset exit"
+
+# Verify every 1 kHz hot symbol + jal targets from updateGyr/updateAcc are < 0x8000
+verify-zw: $(BUILD)/$(TARGET).elf
+	@python3 scripts/verify_zw_hotpath.py $(BUILD)/$(TARGET).elf

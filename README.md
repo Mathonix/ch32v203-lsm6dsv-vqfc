@@ -2,7 +2,7 @@
 
 面向 **CH32V203G6U6** 的裸机姿态固件：通过 **I2C** 读取 **LSM6DSV** 六轴 IMU，经 **[dusking1/vqf-c](https://github.com/DusKing1/vqf-c)** 完整 **VQF**（纯 C、无 malloc）输出四元数与欧拉角，并用 **USART1** 打印调试信息。
 
-Short English: Bare-metal firmware for CH32V203G6U6 + LSM6DSV (I2C) + full VQF attitude filter ([dusking1/vqf-c](https://github.com/DusKing1/vqf-c) MIT port of [dlaidig/vqf](https://github.com/dlaidig/vqf)), UART debug at 115200. Self-contained `Platform/` register HAL + GCC `Makefile`; optional MounRiver Studio (MRS) import. **6DOF only** (no magnetometer). Uses **32 KB zero-wait + ~192 KB non-zero-wait** CodeFlash (datasheet R0WAIT vs total 224 KB).
+Short English: Bare-metal firmware for CH32V203G6U6 + LSM6DSV (I2C) + full VQF attitude filter ([dusking1/vqf-c](https://github.com/DusKing1/vqf-c) MIT port of [dlaidig/vqf](https://github.com/dlaidig/vqf)), UART debug at 115200. Self-contained `Platform/` register HAL + GCC `Makefile`; optional MounRiver Studio (MRS) import. **6DOF only** (no magnetometer). **1 kHz** LSM6DSV HAODR + VQF; full hot call graph forced into **32 KB zero-wait** Flash (`< 0x8000`). NZW ≈ 192 KB for cold/init/printf.
 
 仓库：https://github.com/Mathonix/ch32v203-lsm6dsv-vqfc
 
@@ -43,11 +43,26 @@ WCH datasheet note: **advertised Flash bytes = zero-wait R0WAIT only**. For V203
 | Output section | Region | Contents |
 |----------------|--------|----------|
 | `.init` / `.vector` | `FLASH` | Reset trampoline + vector table |
-| `.text_zw` | `FLASH` | `handle_reset`, IRQ stubs, **`SystemInit`**, hot path (`updateGyr` / `updateAcc` / `getQuat6D`, `lsm6dsv_read_*`, `platform_i2c_*`, SysTick helpers) |
-| `.text_nzw` | `FLASH_NZW` | Cold/init via `FLASH_NZW` attribute + remaining **vqf.o** (e.g. `initVqf` / `setup` / `resetState`) |
-| `.text` / `.fini` | `FLASH_NZW` | Default app/libgcc/picolibc text + rodata |
+| `.text_zw` | `FLASH` | `handle_reset`, IRQ stubs, **`SystemInit`**, **`.text.hot`** (`vqf_sample_step` / `vqf_run_1khz`), **entire remaining `vqf.o` hot graph** (`updateGyr`/`updateAcc`/`getQuat6D` + `quatMultiply`/`quatRotate`/`filterVec`/`norm`/`normalize`/`matrix3Multiply`/`filterCoeffs`/`gainFromTau`/…), `lsm6dsv_read_*`, `platform_i2c_*`, SysTick helpers, soft-float (`__*sf3`/`__*df3`) + libm (`sqrt`/`acos`/`sinf`/`cosf`/kernels) needed by the hot path |
+| `.text_nzw` | `FLASH_NZW` | Cold/init via `FLASH_NZW` attribute + **cold VQF only** (`initVqf`/`setup`/`resetState`/`updateMag`/setters/mag getters) — claimed **before** `.text_zw` so the residual `vqf.o` rule cannot pull them into NZW by accident |
+| `.text` / `.fini` | `FLASH_NZW` | Default app / remaining libc (printf, euler, `main` shell) |
 
-Convention: section name **`.text_nzw` / `.rodata_nzw`** (see `Platform/flash_nzw.h`). Not WCH `.stext` — we keep Qingke `.init`/`.vector` and add `.text_nzw` for cold code.
+Convention: **`FLASH_ZW`** → `.text.hot` (`Platform/flash_zw.h`); **`FLASH_NZW`** → `.text_nzw` (`Platform/flash_nzw.h`). Not WCH `.stext`.
+
+### 1 kHz hot-path ZW guarantee
+
+Goal: **1 kHz VQF output** with **every** high-frequency callee in R0WAIT (`addr < 0x8000`).
+
+1. LSM6DSV XL+GY ODR = **true 1000 Hz** via HAODR (`HAODR_CFG.HAODR_SEL=1`, CTRL1/CTRL2=`0x19`). Without HAODR the same ODR code is 960 Hz.
+2. `initVqf(1.0f/1000, 1.0f/1000, 5.0f)`.
+3. Tight loop body: `FLASH_ZW vqf_sample_step()` → read IMU → `updateGyr` → `updateAcc` → `getQuat6D`. Forever loop `vqf_run_1khz()` is also ZW; UART ~20 Hz stays NZW.
+4. Verify: `make verify-zw` (or `python3 scripts/verify_zw_hotpath.py build/firmware.elf`) checks required symbols and **jal** targets from `updateGyr`/`updateAcc` (and math helpers) are all `< 0x8000`. Example:
+
+```bash
+make PREFIX=riscv64-unknown-elf-
+make verify-zw
+riscv64-unknown-elf-nm -n build/firmware.elf | egrep 'updateGyr|updateAcc|quatMultiply|vqf_sample'
+```
 
 GNU ld **region-list overflow** (`>FLASH FLASH_NZW`) is **not** supported by this toolchain’s `ld` 2.44 (syntax error), so placement is **explicit**.
 
@@ -72,7 +87,8 @@ Public SPL bit headers do not fully document bit 24; the source of truth is WCH�
 #define FLASH_NZW_RODATA __attribute__((section(".rodata_nzw")))
 ```
 
-Marked cold today: `platform_init`, UART/I2C init, `platform_uart_printf`, `lsm6dsv_init`, `quat_to_euler_deg`.
+Marked cold today: `platform_init`, UART/I2C init, `platform_uart_printf`, `lsm6dsv_init`, `quat_to_euler_deg`, `main`.
+Marked hot: `vqf_sample_step`, `vqf_run_1khz` via `FLASH_ZW`.
 
 ---
 
@@ -91,6 +107,7 @@ Platform/
   platform_ch32v203.c     # SystemInit enables FLASH enhance read
   ch32v203_regs.h
   flash_nzw.h             # FLASH_NZW / FLASH_NZW_RODATA
+  flash_zw.h              # FLASH_ZW → .text.hot (1 kHz loop)
 User/
   main.c
   system_ch32v20x.c/h
@@ -114,22 +131,23 @@ vendor/
 
 ### LSM6DSV
 - Soft-reset：CTRL1/CTRL2 power-down → CTRL3 `SW_RESET` → 轮询清除（对齐 ST PID）
-- ODR **120 Hz**（`ODR_AT_120Hz = 0x6`），FS **±4 g / ±2000 dps**
-- **BDU** + **IF_INC**
+- ODR **1000 Hz**（HAODR：`HAODR_CFG=0x01`，CTRL1/CTRL2=`0x19` = `OP_MODE_HAODR|ODR_0x9`；同码在非 HAODR 下为 960 Hz）
+- FS **±4 g / ±2000 dps**，**BDU** + **IF_INC**
 - 灵敏度：accel **0.122 mg/LSB**，gyro **70 mdps/LSB** → 输出 **m/s²** 与 **rad/s**（VQF 所需 SI 单位）
+- 宏：`LSM6DSV_ODR_HZ = 1000.0f`
 
 ### Attitude filter: VQF-C (full VQF)
 - Vendored from **[DusKing1/vqf-c](https://github.com/DusKing1/vqf-c)** (MIT, Hugo Chiang) — full C port of **[dlaidig/vqf](https://github.com/dlaidig/vqf)** by **Daniel Laidig & Thomas Seel** (Information Fusion 2023).
 - API used: `initVqf` / `updateGyr` / `updateAcc` / `getQuat6D`（本工程 **不调用** `updateMag`）
-- **6DOF mode**：`initVqf(1/120, 1/120, 5.0f)` — `gyrTs`/`accTs` 对齐 LSM6DSV **120 Hz** ODR；大 `magTs`（上游 README 示例 5.0）且永不调用 `updateMag`
-- 单位约定（与原版 VQF 文档一致）：陀螺 **rad/s**，加速度 **m/s²**（驱动已转换）
+- **6DOF mode**：`initVqf(1/1000, 1/1000, 5.0f)` — `gyrTs`/`accTs` 对齐 LSM6DSV **1000 Hz** HAODR；大 `magTs` 且永不调用 `updateMag`
+- 单位约定：陀螺 **rad/s**，加速度 **m/s²**（驱动已转换）
 - 无磁计 → **偏航会漂移**（6DOF 正常现象）
-- 欧拉角由 `main.c` 本地四元数辅助函数计算并 UART 打印
+- 欧拉角由 NZW 辅助函数计算；UART 约 **20 Hz** 打印
 
-### main 循环
-1. 初始化时钟 / UART / I2C / IMU / VQF  
+### main / 1 kHz 循环
+1. NZW：初始化时钟 / UART / I2C / IMU / VQF  
 2. WHO_AM_I 失败则打印错误并 **halt**  
-3. 约 **8 ms** 周期读 IMU → `updateGyr` → `updateAcc`；约 **每 100 ms** 打印 `getQuat6D` 四元数与 roll/pitch/yaw  
+3. ZW：`vqf_run_1khz` 以 **1 ms** 节拍调用 `vqf_sample_step`（读 IMU → `updateGyr` → `updateAcc` → `getQuat6D`）；约 **每 50 ms** NZW 打印四元数与 rpy  
 
 ---
 
@@ -143,6 +161,7 @@ vendor/
 make PREFIX=riscv64-unknown-elf-
 # 产物：build/firmware.elf|.hex|.bin
 make size
+make verify-zw   # assert hot symbols + jal targets < 0x8000
 ```
 
 Prefer **ELF/HEX** for programming: the `.bin` spans `0x0000`–end of image and includes a **zero-filled hole** between the end of R0WAIT content (~5.3 KB) and NZW @ `0x8000`.
@@ -177,18 +196,19 @@ LSM6DSV 寄存器与 WHO_AM_I 参考 ST 公开资料（lsm6dsv-pid / 数据手�
 
 本仓库应用代码：MIT（见 `LICENSE`）。`Middleware/vqf-c/` 遵循其上游 MIT（Hugo Chiang）；芯片厂商 SPL 与 ST 驱动头文件各自遵循原许可证。
 
-## 实测体积（本机交叉编译，NZW 布局）
+## 实测体积（本机交叉编译，1 kHz 全热路径 ZW）
 
-工具链：`riscv64-unknown-elf-gcc` 14.2（Debian/Ubuntu apt）+ picolibc，`-Os -ffunction-sections -fdata-sections --gc-sections`，`rv32imac_zicsr` / `ilp32`。
+工具链：`riscv64-unknown-elf-gcc` 14.2（Debian/Ubuntu apt）+ picolibc，`-Os -fno-math-errno -ffunction-sections -fdata-sections --gc-sections`，`rv32imac_zicsr` / `ilp32`。
 
 | 项 | 数值 |
 |---|---|
-| Links cleanly? | **Yes**（不再出现 32K-only overflow） |
-| FLASH zero-wait used (`.init`+`.vector`+`.text_zw`) | **5460 B** / 32768 B (~16.7%) |
-| FLASH_NZW used (`.text_nzw`+`.text`) | **33968 B** / 196608 B (~17.3%) |
-| Berkeley `text` | **39428 B** |
+| Links cleanly? | **Yes**（无 ZW overflow） |
+| ODR | **1000 Hz** HAODR |
+| FLASH zero-wait used (`.init`+`.vector`+`.text_zw`) | **~23448 B** / 32768 B (~71.6%) |
+| FLASH_NZW used (`.text_nzw`+`.text`) | **~16024 B** / 196608 B (~8.2%) |
+| Berkeley `text` | **~39472 B** |
 | `data` | **8 B** |
-| RAM (`data`+`bss`+1 KB stack) | **1608 B** / 10 KB |
-| Image end VMA (last flash byte + `.data` LMA) | ~`0x10490` |
+| RAM (`data`+`bss`+1 KB stack) | **~1608 B** / 10 KB |
+| `make verify-zw` | **OK** — `updateGyr`/`updateAcc` 及 math 辅助 **无 jal ≥ 0x8000** |
 
-结论：完整 `dusking1/vqf-c` + soft-float + printf **可以装进 G6U6**，只要使用 **32K ZW + 192K NZW** 链接图，并在 `SystemInit` 中启用 FLASH enhance read。热路径优先落在 R0WAIT；冷启动与 VQF 主体在 NZW。
+结论：完整 `dusking1/vqf-c` 1 kHz 热调用图 + soft-float/libm **可装入 32K R0WAIT**；冷 init/mag/printf 留在 NZW；`SystemInit` 仍启用 FLASH enhance read。

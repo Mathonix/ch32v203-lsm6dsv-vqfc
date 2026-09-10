@@ -18,12 +18,19 @@ extern "C" {
 #define LSM6DSV_I2C_ADDR_SA0_L   0x6Au
 #define LSM6DSV_I2C_ADDR_SA0_H   0x6Bu
 
+/**
+ * Configured XL+GY output data rate (Hz).
+ * High-accuracy ODR (HAODR_SEL=1, ODR code 0x9) → true 1000 Hz
+ * (standard mode without HAODR would be 960 Hz at the same ODR code).
+ */
+#define LSM6DSV_ODR_HZ           1000.0f
+
 typedef struct {
     uint8_t addr7;
 } lsm6dsv_t;
 
 /**
- * Soft-reset, configure ODR ~120 Hz, FS ±4 g / ±2000 dps, BDU+IF_INC.
+ * Soft-reset, configure ODR 1000 Hz (HAODR), FS ±4 g / ±2000 dps, BDU+IF_INC.
  * @return 0 on success, negative on I2C/config error, -100 on WHO_AM_I mismatch
  */
 int lsm6dsv_init(lsm6dsv_t *dev, uint8_t addr7);

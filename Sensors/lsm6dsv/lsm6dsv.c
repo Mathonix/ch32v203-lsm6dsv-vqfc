@@ -9,14 +9,25 @@
 #define REG_CTRL3      0x12u
 #define REG_CTRL6      0x15u
 #define REG_CTRL8      0x17u
+#define REG_HAODR_CFG  0x62u
 #define REG_OUTX_L_G   0x22u
 
 #define CTRL3_SW_RESET (1u << 0)
 #define CTRL3_IF_INC   (1u << 2)
 #define CTRL3_BDU      (1u << 6)
 
-/* ODR_AT_120Hz = 0x6 in CTRL1/CTRL2 [3:0], OP_MODE high-performance = 0 */
-#define ODR_120HZ      0x06u
+/*
+ * True 1 kHz via high-accuracy ODR mode (HAODR):
+ *   HAODR_CFG.HAODR_SEL = 1 → ODR code 0x9 maps to 1000 Hz (not 960).
+ *   CTRL1/CTRL2: OP_MODE = 001 (HAODR) in [6:4], ODR = 0x9 in [3:0]
+ *     → register value 0x19 (ST LSM6DSV_ODR_HA01_AT_1000Hz).
+ * Nominal rate used by VQF: LSM6DSV_ODR_HZ = 1000.
+ */
+#define HAODR_SEL_1000     0x01u /* HAODR_SEL_[1:0] = 01 */
+#define OP_MODE_HAODR      0x10u /* OP_MODE_[2:0] = 001 << 4 */
+#define ODR_CODE_1000      0x09u
+#define CTRL_HAODR_1000HZ  (uint8_t)(OP_MODE_HAODR | ODR_CODE_1000) /* 0x19 */
+
 #define FS_G_2000DPS   0x04u /* CTRL6[3:0] */
 #define FS_XL_4G       0x01u /* CTRL8[1:0] */
 
@@ -100,10 +111,14 @@ FLASH_NZW int lsm6dsv_init(lsm6dsv_t *dev, uint8_t addr7)
     if (wr(dev, REG_CTRL8, FS_XL_4G) != 0) {
         return -14;
     }
-    if (wr(dev, REG_CTRL1, ODR_120HZ) != 0) {
+    /* Select HAODR table so ODR code 0x9 is true 1000 Hz (not 960). */
+    if (wr(dev, REG_HAODR_CFG, HAODR_SEL_1000) != 0) {
+        return -17;
+    }
+    if (wr(dev, REG_CTRL1, CTRL_HAODR_1000HZ) != 0) {
         return -15;
     }
-    if (wr(dev, REG_CTRL2, ODR_120HZ) != 0) {
+    if (wr(dev, REG_CTRL2, CTRL_HAODR_1000HZ) != 0) {
         return -16;
     }
 

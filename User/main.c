@@ -6,17 +6,21 @@
  *
  * Units (VQF / Laidig–Seel): gyroscope rad/s, accelerometer m/s².
  * LSM6DSV driver already converts to those SI units.
- * Sample period matches LSM6DSV ODR 120 Hz → gyrTs = accTs = 1/120 s.
+ *
+ * Sample rate: LSM6DSV HAODR true 1000 Hz → gyrTs = accTs = 1/1000 s.
+ * Hot path (vqf_sample_step + VQF updateGyr/updateAcc callees) lives in
+ * zero-wait Flash (.text.hot / .text_zw, addresses < 0x8000).
  */
 #include "platform.h"
 #include "flash_nzw.h"
+#include "flash_zw.h"
 #include "lsm6dsv.h"
 #include "vqf.h"
 
 #include <math.h>
 #include <stdint.h>
 
-/** Quaternion (w,x,y,z) → roll/pitch/yaw in degrees (aerospace ZYX). */
+/** Quaternion (w,x,y,z) → roll/pitch/yaw in degrees (aerospace ZYX). NZW. */
 FLASH_NZW static void quat_to_euler_deg(const float q[4], float *roll, float *pitch, float *yaw)
 {
     const float rad2deg = 57.2957795f; /* 180/pi; avoid M_PI for newlib-nano */
@@ -38,10 +42,71 @@ FLASH_NZW static void quat_to_euler_deg(const float q[4], float *roll, float *pi
     *yaw = atan2f(siny_cosp, cosy_cosp) * rad2deg;
 }
 
-int main(void)
+/** Low-rate UART status (NZW — must not run on the 1 kHz hot path). */
+FLASH_NZW static void vqf_uart_print_status(const float q[4])
+{
+    float roll, pitch, yaw;
+    quat_to_euler_deg(q, &roll, &pitch, &yaw);
+    platform_uart_printf(
+        "q=%.4f,%.4f,%.4f,%.4f  rpy=%.1f,%.1f,%.1f\n",
+        (double)q[0], (double)q[1], (double)q[2], (double)q[3],
+        (double)roll, (double)pitch, (double)yaw);
+}
+
+/**
+ * 1 kHz hot body in zero-wait Flash: IMU read → updateGyr → updateAcc → getQuat6D.
+ * Returns 0 on success, negative on IMU read error.
+ */
+FLASH_ZW int vqf_sample_step(lsm6dsv_t *imu, float q_out[4])
+{
+    float acc[3], gyr[3];
+    if (lsm6dsv_read_acc_gyr(imu, acc, gyr) != 0) {
+        return -1;
+    }
+    /* SI units from driver: gyr rad/s, acc m/s² — as required by VQF */
+    updateGyr(gyr);
+    updateAcc(acc);
+    /* 6DOF: do not call updateMag */
+    getQuat6D(q_out);
+    return 0;
+}
+
+/**
+ * Forever 1 kHz sample loop — entire function in ZW so the cadence path
+ * never executes from NZW. UART print is delegated to NZW at ~20 Hz.
+ */
+FLASH_ZW void vqf_run_1khz(lsm6dsv_t *imu)
+{
+    uint32_t last_ms = platform_millis();
+    uint32_t last_print = last_ms;
+    const uint32_t sample_period_ms = 1u; /* 1000 Hz wall-clock cadence */
+    const uint32_t print_period_ms = 50u; /* ~20 Hz UART */
+    float q[4];
+
+    while (1) {
+        uint32_t now = platform_millis();
+        if ((uint32_t)(now - last_ms) < sample_period_ms) {
+            continue;
+        }
+        last_ms = now;
+
+        if (vqf_sample_step(imu, q) != 0) {
+            /* Avoid printf on the hot path; brief back-off only */
+            platform_delay_ms(1);
+            continue;
+        }
+
+        if ((uint32_t)(now - last_print) >= print_period_ms) {
+            last_print = now;
+            vqf_uart_print_status(q);
+        }
+    }
+}
+
+FLASH_NZW int main(void)
 {
     platform_init();
-    platform_uart_printf("\nCH32V203 + LSM6DSV + VQF-C (6DOF)\n");
+    platform_uart_printf("\nCH32V203 + LSM6DSV + VQF-C (6DOF, 1 kHz ZW)\n");
     platform_uart_printf("I2C1 PB6/PB7, USART1 PA9, IMU addr 0x6A\n");
 
     lsm6dsv_t imu;
@@ -59,48 +124,19 @@ int main(void)
         while (1) {
         }
     }
-    platform_uart_printf("LSM6DSV OK (WHO_AM_I=0x%02X)\n", LSM6DSV_WHO_AM_I_VALUE);
+    platform_uart_printf("LSM6DSV OK (WHO_AM_I=0x%02X, ODR=%.0f Hz HAODR)\n",
+                         LSM6DSV_WHO_AM_I_VALUE, (double)LSM6DSV_ODR_HZ);
 
-    /* Match LSM6DSV ODR_AT_120Hz; large magTs + no updateMag => 6DOF mode */
-    const float gyrTs = 1.0f / 120.0f;
-    const float accTs = 1.0f / 120.0f;
+    /* Match LSM6DSV 1000 Hz HAODR; large magTs + no updateMag => 6DOF mode */
+    const float gyrTs = 1.0f / LSM6DSV_ODR_HZ;
+    const float accTs = 1.0f / LSM6DSV_ODR_HZ;
     const float magTs = 5.0f;
     initVqf(gyrTs, accTs, magTs);
-    platform_uart_printf("VQF init: gyrTs=accTs=1/120, magTs=5.0 (no mag)\n");
+    platform_uart_printf("VQF init: gyrTs=accTs=1/%.0f, magTs=5.0 (no mag)\n",
+                         (double)LSM6DSV_ODR_HZ);
+    platform_uart_printf("Hot path in zero-wait Flash (<0x8000); UART ~20 Hz NZW\n");
 
-    uint32_t last_ms = platform_millis();
-    uint32_t last_print = last_ms;
-    const uint32_t sample_period_ms = 8u; /* ~120 Hz */
-
-    while (1) {
-        uint32_t now = platform_millis();
-        if ((uint32_t)(now - last_ms) < sample_period_ms) {
-            continue;
-        }
-        last_ms = now;
-
-        float acc[3], gyr[3];
-        if (lsm6dsv_read_acc_gyr(&imu, acc, gyr) != 0) {
-            platform_uart_printf("IMU read error\n");
-            platform_delay_ms(50);
-            continue;
-        }
-
-        /* SI units from driver: gyr rad/s, acc m/s² — as required by VQF */
-        updateGyr(gyr);
-        updateAcc(acc);
-        /* 6DOF: do not call updateMag */
-
-        if ((uint32_t)(now - last_print) >= 100u) {
-            last_print = now;
-            float q[4];
-            float roll, pitch, yaw;
-            getQuat6D(q);
-            quat_to_euler_deg(q, &roll, &pitch, &yaw);
-            platform_uart_printf(
-                "q=%.4f,%.4f,%.4f,%.4f  rpy=%.1f,%.1f,%.1f\n",
-                (double)q[0], (double)q[1], (double)q[2], (double)q[3],
-                (double)roll, (double)pitch, (double)yaw);
-        }
-    }
+    /* Never return — 1 kHz loop executes from FLASH_ZW */
+    vqf_run_1khz(&imu);
+    return 0;
 }
