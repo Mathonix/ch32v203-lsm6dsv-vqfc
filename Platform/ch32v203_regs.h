@@ -40,6 +40,19 @@
 #define RCC_USART1EN    (1u << 14)
 #define RCC_I2C1EN      (1u << 21) /* APB1 */
 
+/* ---- FLASH (AHB) — enhance read for NZW CodeFlash ---- */
+/* CTLR bits 24/22/25 from WCH ch32v20x_flash.c FLASH_Enhance_Mode /
+ * FLASH_Access_Clock_Cfg (not fully enumerated in public bit headers). */
+#define FLASH_R_BASE      0x40022000u
+#define FLASH_ACTLR       REG32(FLASH_R_BASE + 0x00)
+#define FLASH_KEYR        REG32(FLASH_R_BASE + 0x04)
+#define FLASH_CTLR        REG32(FLASH_R_BASE + 0x10)
+#define FLASH_KEY1        0x45670123u
+#define FLASH_KEY2        0xCDEF89ABu
+#define FLASH_CTLR_LOCK   (1u << 7)
+#define FLASH_CTLR_ENHANCE_READ (1u << 24) /* FLASH_Enhance_Mode(ENABLE) */
+#define FLASH_CTLR_ENHANCE_CLK  (1u << 25) /* FLASH_Access_SYSTEM */
+
 /* ---- EXTEN (CH32 specific) ---- */
 #define EXTEN_CTR       REG32(0x40023800u)
 #define EXTEN_HSIPRE    (1u << 4)

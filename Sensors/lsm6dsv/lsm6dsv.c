@@ -1,5 +1,6 @@
 #include "lsm6dsv.h"
 #include "platform.h"
+#include "flash_nzw.h"
 
 /* Register map (ST lsm6dsv-pid / DS13476) */
 #define REG_WHO_AM_I   0x0Fu
@@ -68,7 +69,7 @@ int lsm6dsv_whoami(lsm6dsv_t *dev, uint8_t *id)
     return rd(dev, REG_WHO_AM_I, id, 1);
 }
 
-int lsm6dsv_init(lsm6dsv_t *dev, uint8_t addr7)
+FLASH_NZW int lsm6dsv_init(lsm6dsv_t *dev, uint8_t addr7)
 {
     if (dev == 0) {
         return -1;

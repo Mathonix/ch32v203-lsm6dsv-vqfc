@@ -5,12 +5,11 @@
 #   make flash      # optional: openocd + wch-link (adjust OPENOCD)
 #
 # MRS path: create a CH32V203 project, add User/Sensors/Middleware/Platform
-# sources, use Startup/link.ld (32K/10K). SPL not required for this Makefile.
+# sources, use Startup/link.ld (32K ZW + 192K NZW / 10K RAM). SPL not required for this Makefile.
 #
-# Flash note: Middleware/vqf-c/vqf.c is a full VQF (~39 KB source). On the
-# CH32V203G6U6 (32 KB Flash) the linked image may exceed Flash; keep -Os,
-# --gc-sections, and nano.specs. If oversized, measure with `make size` and
-# consider a larger Flash CH32V203 variant or a size-reduced VQF build.
+# Flash: G6U6 R0WAIT=32KB zero-wait + ~192KB non-zero-wait (total CodeFlash 224KB).
+# Startup/link.ld places vectors/reset/SystemInit/hot path in FLASH (ZW) and
+# cold/init + VQF bulk + libc in FLASH_NZW @ 0x8000. See README NZW section.
 
 TARGET   ?= firmware
 BUILD    ?= build

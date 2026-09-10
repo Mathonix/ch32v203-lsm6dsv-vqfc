@@ -9,6 +9,7 @@
  * Sample period matches LSM6DSV ODR 120 Hz → gyrTs = accTs = 1/120 s.
  */
 #include "platform.h"
+#include "flash_nzw.h"
 #include "lsm6dsv.h"
 #include "vqf.h"
 
@@ -16,7 +17,7 @@
 #include <stdint.h>
 
 /** Quaternion (w,x,y,z) → roll/pitch/yaw in degrees (aerospace ZYX). */
-static void quat_to_euler_deg(const float q[4], float *roll, float *pitch, float *yaw)
+FLASH_NZW static void quat_to_euler_deg(const float q[4], float *roll, float *pitch, float *yaw)
 {
     const float rad2deg = 57.2957795f; /* 180/pi; avoid M_PI for newlib-nano */
     const float w = q[0], x = q[1], y = q[2], z = q[3];

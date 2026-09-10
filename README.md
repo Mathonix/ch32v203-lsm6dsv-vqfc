@@ -2,7 +2,7 @@
 
 面向 **CH32V203G6U6** 的裸机姿态固件：通过 **I2C** 读取 **LSM6DSV** 六轴 IMU，经 **[dusking1/vqf-c](https://github.com/DusKing1/vqf-c)** 完整 **VQF**（纯 C、无 malloc）输出四元数与欧拉角，并用 **USART1** 打印调试信息。
 
-Short English: Bare-metal firmware for CH32V203G6U6 + LSM6DSV (I2C) + full VQF attitude filter ([dusking1/vqf-c](https://github.com/DusKing1/vqf-c) MIT port of [dlaidig/vqf](https://github.com/dlaidig/vqf)), UART debug at 115200. Self-contained `Platform/` register HAL + GCC `Makefile`; optional MounRiver Studio (MRS) import. **6DOF only** (no magnetometer). **Caution:** full VQF may stress **32 KB Flash / 10 KB SRAM** on G6U6 — check `make size` after linking.
+Short English: Bare-metal firmware for CH32V203G6U6 + LSM6DSV (I2C) + full VQF attitude filter ([dusking1/vqf-c](https://github.com/DusKing1/vqf-c) MIT port of [dlaidig/vqf](https://github.com/dlaidig/vqf)), UART debug at 115200. Self-contained `Platform/` register HAL + GCC `Makefile`; optional MounRiver Studio (MRS) import. **6DOF only** (no magnetometer). Uses **32 KB zero-wait + ~192 KB non-zero-wait** CodeFlash (datasheet R0WAIT vs total 224 KB).
 
 仓库：https://github.com/Mathonix/ch32v203-lsm6dsv-vqfc
 
@@ -12,7 +12,9 @@ Short English: Bare-metal firmware for CH32V203G6U6 + LSM6DSV (I2C) + full VQF a
 
 | 项目 | 约定 |
 |------|------|
-| MCU | **CH32V203G6U6**（QFN28，**32 KB Flash / 10 KB SRAM**）— `Startup/link.ld` 已按此容量配置 |
+| MCU | **CH32V203G6U6**（QFN28） |
+| Flash 布局 | **R0WAIT = 32 KB** zero-wait @ `0x00000000`；**NZW ≈ 192 KB** @ `0x00008000`（总 CodeFlash ≈ 224 KB = 32K + 192K） |
+| RAM | **10 KB** @ `0x20000000` |
 | 内核系列 | CH32V20x **D6**（与 F6/C6/G6 同启动文件） |
 | IMU | **LSM6DSV**，I2C，**WHO_AM_I = 0x70**（ST DS13476 / lsm6dsv-pid） |
 | I2C 地址 | 默认 **0x6A**（7-bit，**SA0/SDO = GND**）；SA0 接 Vdd_IO 时为 **0x6B** |
@@ -21,6 +23,56 @@ Short English: Bare-metal firmware for CH32V203G6U6 + LSM6DSV (I2C) + full VQF a
 | 上拉 | I2C 需外部上拉（典型 4.7 kΩ 至 Vdd_IO）；SDA/SCL 开漏 |
 
 若改用其它引脚，请同步修改 `Platform/platform_ch32v203.c` 并更新本文档。
+
+---
+
+## Non-zero-wait Flash (NZW) layout
+
+WCH datasheet note: **advertised Flash bytes = zero-wait R0WAIT only**. For V203 (non-RB), total CodeFlash ≈ **224 KB**; NZW = `224K − R0WAIT`. On **G6U6**, R0WAIT = **32 KB**, so NZW ≈ **192 KB** starting at **`0x00008000`** when FLASH base is `0x00000000` (this project’s `Startup/link.ld`).
+
+### MEMORY regions (`Startup/link.ld`)
+
+| Region | Origin | Length | Role |
+|--------|--------|--------|------|
+| `FLASH` | `0x00000000` | 32K | Zero-wait R0WAIT |
+| `FLASH_NZW` | `0x00008000` | 192K | Non-zero-wait CodeFlash |
+| `RAM` | `0x20000000` | 10K | SRAM |
+
+### Section placement
+
+| Output section | Region | Contents |
+|----------------|--------|----------|
+| `.init` / `.vector` | `FLASH` | Reset trampoline + vector table |
+| `.text_zw` | `FLASH` | `handle_reset`, IRQ stubs, **`SystemInit`**, hot path (`updateGyr` / `updateAcc` / `getQuat6D`, `lsm6dsv_read_*`, `platform_i2c_*`, SysTick helpers) |
+| `.text_nzw` | `FLASH_NZW` | Cold/init via `FLASH_NZW` attribute + remaining **vqf.o** (e.g. `initVqf` / `setup` / `resetState`) |
+| `.text` / `.fini` | `FLASH_NZW` | Default app/libgcc/picolibc text + rodata |
+
+Convention: section name **`.text_nzw` / `.rodata_nzw`** (see `Platform/flash_nzw.h`). Not WCH `.stext` — we keep Qingke `.init`/`.vector` and add `.text_nzw` for cold code.
+
+GNU ld **region-list overflow** (`>FLASH FLASH_NZW`) is **not** supported by this toolchain’s `ld` 2.44 (syntax error), so placement is **explicit**.
+
+### FLASH enhance read mode
+
+Before any NZW code runs, `SystemInit` (kept in zero-wait) unlocks Flash and sets **`FLASH_CTLR` bit 24** — the same poke as WCH EVT `FLASH_Enhance_Mode(ENABLE)` in [`ch32v20x_flash.c`](https://github.com/openwch/ch32v20x/blob/main/EVT/EXAM/SRC/Peripheral/src/ch32v20x_flash.c).
+
+```c
+FLASH_KEYR = 0x45670123; FLASH_KEYR = 0xCDEF89AB;
+FLASH_CTLR |= (1u << 24);  /* enhance read */
+FLASH_CTLR |= (1u << 7);   /* re-lock */
+```
+
+Public SPL bit headers do not fully document bit 24; the source of truth is WCH’s `FLASH_Enhance_Mode`. If enhance mode were omitted, fetch/execute from NZW may be unreliable — treat on-hardware validation as required.
+
+### C attribute helper
+
+`Platform/flash_nzw.h`:
+
+```c
+#define FLASH_NZW        __attribute__((section(".text_nzw")))
+#define FLASH_NZW_RODATA __attribute__((section(".rodata_nzw")))
+```
+
+Marked cold today: `platform_init`, UART/I2C init, `platform_uart_printf`, `lsm6dsv_init`, `quat_to_euler_deg`.
 
 ---
 
@@ -33,16 +85,17 @@ LICENSE
 Makefile
 Startup/
   startup_ch32v20x_D6.S
-  link.ld                 # 32K Flash / 10K RAM
+  link.ld                 # 32K ZW + 192K NZW / 10K RAM
 Platform/
-  platform.h              # i2c_write/read, delay_ms, uart_printf
-  platform_ch32v203.c     # 寄存器级 RCC/GPIO/I2C1/USART1/SysTick
+  platform.h
+  platform_ch32v203.c     # SystemInit enables FLASH enhance read
   ch32v203_regs.h
+  flash_nzw.h             # FLASH_NZW / FLASH_NZW_RODATA
 User/
   main.c
   system_ch32v20x.c/h
   ch32v20x_it.c/h
-  ch32v20x_conf.h         # MRS/SPL 兼容占位
+  ch32v20x_conf.h
 Sensors/lsm6dsv/
   lsm6dsv.c/h
 Middleware/vqf-c/         # vendored dusking1/vqf-c (MIT)
@@ -73,11 +126,6 @@ vendor/
 - 无磁计 → **偏航会漂移**（6DOF 正常现象）
 - 欧拉角由 `main.c` 本地四元数辅助函数计算并 UART 打印
 
-### Flash / RAM caution (CH32V203G6U6)
-- `vqf.c` 约 **39 KB** 源码，含完整 9D/磁干扰抑制等路径；即使 `--gc-sections` + `-Os`，**32 KB Flash** 仍可能不够。链接后务必 `make size`。
-- 静态状态约数百字节～1 KB 量级 BSS（params/coeffs/state），再叠加栈与驱动；**10 KB SRAM** 也需留意。
-- 可选瘦身提示（不破坏公开 API）：更大 Flash 型号；或在确认不调用 `updateMag`/`getQuat9D` 时依赖链接器 GC 剔除未引用符号（本仓库未改算法内核）。本地相对上游的小修复见 `Middleware/vqf-c/NOTICE`（`initVqf` 补调 `init_params()`）。
-
 ### main 循环
 1. 初始化时钟 / UART / I2C / IMU / VQF  
 2. WHO_AM_I 失败则打印错误并 **halt**  
@@ -89,20 +137,22 @@ vendor/
 
 ### A. GCC Makefile（推荐先试）
 
-依赖：`riscv-none-elf-gcc`（xPack）或 MRS 自带的 `riscv-none-embed-gcc`。
+依赖：`riscv-none-elf-gcc`（xPack）或 MRS 自带的 `riscv-none-embed-gcc`，或 Debian/Ubuntu `riscv64-unknown-elf-gcc` + picolibc。
 
 ```bash
-make
+make PREFIX=riscv64-unknown-elf-
 # 产物：build/firmware.elf|.hex|.bin
-make size   # 确认是否超出 32K Flash
+make size
 ```
+
+Prefer **ELF/HEX** for programming: the `.bin` spans `0x0000`–end of image and includes a **zero-filled hole** between the end of R0WAIT content (~5.3 KB) and NZW @ `0x8000`.
 
 烧录需 WCH-Link + OpenOCD（或 MRS 下载），`make flash` 仅为示例，请按本机 `openocd`/`wch-riscv.cfg` 调整。
 
 ### B. MounRiver Studio
 
-1. 新建 **CH32V203** 工程，芯片选 **CH32V203G6U6**（或同 D6、确认 Flash/RAM）。  
-2. 将本仓库 `User/`、`Sensors/`、`Middleware/`、`Platform/` 加入工程；用本仓库 `Startup/link.ld` 替换默认链接脚本（**32K/10K**）。  
+1. 新建 **CH32V203** 工程，芯片选 **CH32V203G6U6**（或同 D6）。  
+2. 将本仓库 `User/`、`Sensors/`、`Middleware/`、`Platform/` 加入工程；用本仓库 `Startup/link.ld` 替换默认链接脚本（**32K ZW + 192K NZW / 10K**）。  
 3. **可选**：从 MRS pack 加入 WCH SPL；若继续用 `Platform/` 寄存器实现，可不链 SPL 的 I2C/USART 源文件以免重复。  
 4. 包含路径加上 `Platform`、`Sensors/lsm6dsv`、`Middleware/vqf-c`。  
 5. 编译下载，串口 115200 查看输出。
@@ -127,18 +177,18 @@ LSM6DSV 寄存器与 WHO_AM_I 参考 ST 公开资料（lsm6dsv-pid / 数据手�
 
 本仓库应用代码：MIT（见 `LICENSE`）。`Middleware/vqf-c/` 遵循其上游 MIT（Hugo Chiang）；芯片厂商 SPL 与 ST 驱动头文件各自遵循原许可证。
 
-## 实测体积（本机交叉编译）
+## 实测体积（本机交叉编译，NZW 布局）
 
 工具链：`riscv64-unknown-elf-gcc` 14.2（Debian/Ubuntu apt）+ picolibc，`-Os -ffunction-sections -fdata-sections --gc-sections`，`rv32imac_zicsr` / `ilp32`。
 
 | 项 | 数值 |
 |---|---|
-| Flash（text+data） | **39288 B（≈ 38.4 KB）** |
-| CH32V203G6U6 Flash 上限 | 32768 B（32 KB） |
-| 超出 | **6520 B** |
-| RAM（data+bss，含 1 KB 栈） | **1608 B** / 10 KB |
-| `.bin` | 39288 B |
+| Links cleanly? | **Yes**（不再出现 32K-only overflow） |
+| FLASH zero-wait used (`.init`+`.vector`+`.text_zw`) | **5460 B** / 32768 B (~16.7%) |
+| FLASH_NZW used (`.text_nzw`+`.text`) | **33968 B** / 196608 B (~17.3%) |
+| Berkeley `text` | **39428 B** |
+| `data` | **8 B** |
+| RAM (`data`+`bss`+1 KB stack) | **1608 B** / 10 KB |
+| Image end VMA (last flash byte + `.data` LMA) | ~`0x10490` |
 
-结论：**完整 `dusking1/vqf-c` + soft-float + printf 无法装进 G6U6 的 32 KB Flash**；RAM 充足。更大容量型号（例如 ≥64 KB Flash 的 CH32V203）可直接用；若必须留在 G6，需裁剪 printf、改用 basic VQF，或换更小滤波。
-
-
+结论：完整 `dusking1/vqf-c` + soft-float + printf **可以装进 G6U6**，只要使用 **32K ZW + 192K NZW** 链接图，并在 `SystemInit` 中启用 FLASH enhance read。热路径优先落在 R0WAIT；冷启动与 VQF 主体在 NZW。

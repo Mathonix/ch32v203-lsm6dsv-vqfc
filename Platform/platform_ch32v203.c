@@ -3,6 +3,7 @@
  */
 #include "platform.h"
 #include "ch32v203_regs.h"
+#include "flash_nzw.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -32,6 +33,20 @@ static void gpio_set_mode_high(uint32_t gpiobase, unsigned pin, uint32_t mode_ni
 
 void SystemInit(void)
 {
+    /*
+     * Enable FLASH enhance read mode BEFORE any code in FLASH_NZW runs.
+     * Source: WCH EVT ch32v20x_flash.c FLASH_Enhance_Mode(ENABLE) sets
+     * FLASH->CTLR bit 24. Unlock first (same keys as programming unlock).
+     * Without this, execute/fetch from non-zero-wait CodeFlash may be unreliable.
+     * See also FLASH_Access_Clock_Cfg; we leave enhance clock at reset default.
+     */
+    if ((FLASH_CTLR & FLASH_CTLR_LOCK) != 0u) {
+        FLASH_KEYR = FLASH_KEY1;
+        FLASH_KEYR = FLASH_KEY2;
+    }
+    FLASH_CTLR |= FLASH_CTLR_ENHANCE_READ;
+    FLASH_CTLR |= FLASH_CTLR_LOCK;
+
     /* Prefer HSI * 18 = 144 MHz (CH32 EXTEN HSIPRE path, common bare-metal demo). */
     RCC_CTLR |= RCC_HSION;
     while ((RCC_CTLR & RCC_HSIRDY) == 0u) {
@@ -95,7 +110,7 @@ void platform_delay_ms(uint32_t ms)
     }
 }
 
-static void usart1_init(uint32_t baud)
+FLASH_NZW static void usart1_init(uint32_t baud)
 {
     RCC_APB2PCENR |= RCC_IOPAEN | RCC_USART1EN | RCC_AFIOEN;
 
@@ -130,7 +145,7 @@ void platform_uart_write(const char *s)
     }
 }
 
-void platform_uart_printf(const char *fmt, ...)
+FLASH_NZW void platform_uart_printf(const char *fmt, ...)
 {
     char buf[160];
     va_list ap;
@@ -155,7 +170,7 @@ static int i2c_wait_flag(volatile uint16_t *reg, uint16_t mask, int set, uint32_
     return -1;
 }
 
-static void i2c1_init(void)
+FLASH_NZW static void i2c1_init(void)
 {
     RCC_APB2PCENR |= RCC_IOPBEN | RCC_AFIOEN;
     RCC_APB1PCENR |= RCC_I2C1EN;
@@ -281,7 +296,7 @@ int platform_i2c_read(uint8_t addr7, uint8_t reg, uint8_t *data, uint16_t len)
     return 0;
 }
 
-void platform_init(void)
+FLASH_NZW void platform_init(void)
 {
     /* SystemInit already ran from reset; re-assert clock var. */
     if (SystemCoreClock < 1000000u) {
