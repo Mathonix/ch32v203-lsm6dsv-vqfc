@@ -47,10 +47,11 @@ FLASH_NZW static void vqf_uart_print_status(const float q[4])
 {
     float roll, pitch, yaw;
     quat_to_euler_deg(q, &roll, &pitch, &yaw);
+    /* Euler primary (deg, ZYX); quat secondary for debug */
     platform_uart_printf(
-        "q=%.4f,%.4f,%.4f,%.4f  rpy=%.1f,%.1f,%.1f\n",
-        (double)q[0], (double)q[1], (double)q[2], (double)q[3],
-        (double)roll, (double)pitch, (double)yaw);
+        "roll=%.2f pitch=%.2f yaw=%.2f | q=%.4f,%.4f,%.4f,%.4f\n",
+        (double)roll, (double)pitch, (double)yaw,
+        (double)q[0], (double)q[1], (double)q[2], (double)q[3]);
 }
 
 /**
@@ -134,7 +135,7 @@ FLASH_NZW int main(void)
     initVqf(gyrTs, accTs, magTs);
     platform_uart_printf("VQF init: gyrTs=accTs=1/%.0f, magTs=5.0 (no mag)\n",
                          (double)LSM6DSV_ODR_HZ);
-    platform_uart_printf("Hot path in zero-wait Flash (<0x8000); UART ~20 Hz NZW\n");
+    platform_uart_printf("Hot path ZW (<0x8000); UART Euler ~20 Hz on USART1 PA9 115200\n");
 
     /* Never return — 1 kHz loop executes from FLASH_ZW */
     vqf_run_1khz(&imu);
