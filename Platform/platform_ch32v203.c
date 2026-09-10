@@ -147,6 +147,14 @@ void platform_uart_write(const char *s)
     }
 }
 
+FLASH_NZW int platform_uart_getc_nonblock(void)
+{
+    if ((USART1_STATR & USART_RXNE) == 0u) {
+        return -1;
+    }
+    return (int)(uint8_t)USART1_DATAR;
+}
+
 FLASH_NZW void platform_uart_printf(const char *fmt, ...)
 {
     char buf[160];

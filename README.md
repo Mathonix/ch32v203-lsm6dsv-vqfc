@@ -1,8 +1,8 @@
-# CH32V203G6U6 + LSM6DSV + VQF-C
+# CH32V203G6U6 + LSM6DSV + multi-algo fusion
 
-面向 **CH32V203G6U6** 的裸机姿态固件：通过 **I2C** 读取 **LSM6DSV** 六轴 IMU，经 **[dusking1/vqf-c](https://github.com/DusKing1/vqf-c)** 完整 **VQF**（纯 C、无 malloc）输出四元数与欧拉角，并用 **USART1** 打印调试信息。
+面向 **CH32V203G6U6** 的裸机姿态固件：通过 **I2C** 读取 **LSM6DSV** 六轴 IMU，经可切换的 **6DOF** 融合算法输出四元数与欧拉角。默认 **VQF**（[dusking1/vqf-c](https://github.com/DusKing1/vqf-c)）在 **zero-wait Flash** 执行；可选 **Mahony** / **complementary** 从 NZW 拷入 **ALGO_RAM** 后在 SRAM 执行。算法选择持久化在 Flash 标志位。
 
-Short English: Bare-metal firmware for CH32V203G6U6 + LSM6DSV (I2C) + full VQF attitude filter ([dusking1/vqf-c](https://github.com/DusKing1/vqf-c) MIT port of [dlaidig/vqf](https://github.com/dlaidig/vqf)). **1 kHz** Euler out on **USART1 binary @ 921600** and **CAN1 @ 1 Mbit** (std ID `0x321`). Boot banner still uses printf once. Self-contained `Platform/` register HAL + GCC `Makefile`; optional MRS. **6DOF only**. Full hot path (sample+euler+uart_bin+can_tx + libm) in **32 KB zero-wait** Flash (`< 0x8000`).
+Short English: Bare-metal CH32V203G6U6 + LSM6DSV (I2C) with selectable 6DOF fusion (**VQF** default in ZW Flash; **Mahony** / **complementary** execute from **SRAM** after boot memcpy). **1 kHz** Euler on **USART1 binary @ 921600** + **CAN1 @ 1 Mbit** (`0x321`). Algo flag in NZW @ `0x37000`. Self-contained `Platform/` + GCC `Makefile`.
 
 仓库：https://github.com/Mathonix/ch32v203-lsm6dsv-vqfc
 
@@ -13,8 +13,8 @@ Short English: Bare-metal firmware for CH32V203G6U6 + LSM6DSV (I2C) + full VQF a
 | 项目 | 约定 |
 |------|------|
 | MCU | **CH32V203G6U6**（QFN28） |
-| Flash 布局 | **R0WAIT = 32 KB** zero-wait @ `0x00000000`；**NZW ≈ 192 KB** @ `0x00008000`（总 CodeFlash ≈ 224 KB = 32K + 192K） |
-| RAM | **10 KB** @ `0x20000000` |
+| Flash 布局 | **R0WAIT = 32 KB** ZW @ `0x00000000`；**NZW code 188 KB** @ `0x00008000`；**algo_cfg 4 KB** @ `0x00037000`（总 CodeFlash ≈ 224 KB） |
+| RAM | **10 KB** total：`ALGO_RAM` **4 KB** @ `0x20000000` + **6 KB** data/bss/stack @ `0x20001000` |
 | 内核系列 | CH32V20x **D6**（与 F6/C6/G6 同启动文件） |
 | IMU | **LSM6DSV**，I2C，**WHO_AM_I = 0x70**（ST DS13476 / lsm6dsv-pid） |
 | I2C 地址 | 默认 **0x6A**（7-bit，**SA0/SDO = GND**）；SA0 接 Vdd_IO 时为 **0x6B** |
@@ -37,19 +37,23 @@ WCH datasheet note: **advertised Flash bytes = zero-wait R0WAIT only**. For V203
 | Region | Origin | Length | Role |
 |--------|--------|--------|------|
 | `FLASH` | `0x00000000` | 32K | Zero-wait R0WAIT |
-| `FLASH_NZW` | `0x00008000` | 192K | Non-zero-wait CodeFlash |
-| `RAM` | `0x20000000` | 10K | SRAM |
+| `FLASH_NZW` | `0x00008000` | 188K | Non-zero-wait CodeFlash (code + `.algo_ram` LMA) |
+| `ALGO_CFG` | `0x00037000` | 4K | Persistent algo select flag (NOLOAD; programmed at runtime) |
+| `ALGO_RAM` | `0x20000000` | 4K | SRAM execute window for Mahony + complementary |
+| `RAM` | `0x20001000` | 6K | `.data` / `.bss` / stack (1024 B) |
 
 ### Section placement
 
 | Output section | Region | Contents |
 |----------------|--------|----------|
 | `.init` / `.vector` | `FLASH` | Reset trampoline + vector table |
-| `.text_zw` | `FLASH` | `handle_reset`, IRQ stubs, **`SystemInit`**, **`.text.hot`** (`vqf_sample_step` / `vqf_run_1khz` / `quat_to_euler_deg`), VQF hot graph, `lsm6dsv_read_*`, `platform_i2c_*`, **`platform_uart_write_bytes` / `platform_uart_send_euler_bin` / `platform_can_send_euler`**, SysTick helpers, soft-float + libm (`sqrt`/`acos`/`sinf`/`cosf`/`asinf`/`atan2f`/`atanf`/kernels) |
-| `.text_nzw` | `FLASH_NZW` | Cold/init via `FLASH_NZW` attribute + **cold VQF only** (`initVqf`/`setup`/`resetState`/`updateMag`/setters/mag getters) — claimed **before** `.text_zw` |
-| `.text` / `.fini` | `FLASH_NZW` | Default app / remaining libc (printf, `main` shell) |
+| `.text_zw` | `FLASH` | `SystemInit`, **`.text.hot`** (`fusion_sample_step` / `fusion_run_1khz` / Euler / VQF wrappers), VQF hot graph, IMU/I2C, UART binary + CAN TX, soft-float + libm |
+| `.text_nzw` | `FLASH_NZW` | Cold/init + cold VQF (`initVqf`/mag/setters) |
+| `.text` / `.fini` | `FLASH_NZW` | `main`, printf, `algo_cfg_*`, remaining libc |
+| `.algo_ram` | `ALGO_RAM` AT>`FLASH_NZW` | Mahony + complementary code (startup memcpy LMA→VMA) |
+| `.algo_cfg` | `ALGO_CFG` NOLOAD | Flag slot @ `0x37000` |
 
-Convention: **`FLASH_ZW`** → `.text.hot` (`Platform/flash_zw.h`); **`FLASH_NZW`** → `.text_nzw` (`Platform/flash_nzw.h`). Not WCH `.stext`.
+Convention: **`FLASH_ZW`** → `.text.hot`; **`FLASH_NZW`** → `.text_nzw`; algo code → `.algo_text.*` (VMA=ALGO_RAM).
 
 ### 1 kHz hot-path ZW guarantee
 
@@ -57,16 +61,68 @@ Goal: **1 kHz VQF output** with **every** high-frequency callee in R0WAIT (`addr
 
 1. LSM6DSV XL+GY ODR = **true 1000 Hz** via HAODR (`HAODR_CFG.HAODR_SEL=1`, CTRL1/CTRL2=`0x19`). Without HAODR the same ODR code is 960 Hz.
 2. `initVqf(1.0f/1000, 1.0f/1000, 5.0f)`.
-3. Tight loop body: `FLASH_ZW vqf_sample_step()` → read IMU → `updateGyr` → `updateAcc` → `getQuat6D`, then **Euler → UART binary + CAN TX** every sample inside `vqf_run_1khz()` (all ZW). Optional `#define VQF_UART_ASCII_DEBUG 1` re-enables ~20 Hz printf (NZW; off by default).
-4. Verify: `make verify-zw` (or `python3 scripts/verify_zw_hotpath.py build/firmware.elf`) checks required symbols and **jal** targets from `updateGyr`/`updateAcc` (and math helpers) are all `< 0x8000`. Example:
+3. Tight loop: `FLASH_ZW fusion_run_1khz()` → `fusion_sample_step` → IMU → `fusion_active->update` / `get_quat` → Euler → UART + CAN. VQF callees stay ZW; Mahony/Comp run from ALGO_RAM via function pointers.
+4. Verify: `make verify-zw` checks VQF hot symbols `< 0x8000` and Mahony/Comp symbols in ALGO_RAM. Example:
 
 ```bash
 make PREFIX=riscv64-unknown-elf-
 make verify-zw
-riscv64-unknown-elf-nm -n build/firmware.elf | egrep 'updateGyr|updateAcc|quatMultiply|vqf_sample'
+riscv64-unknown-elf-nm -n build/firmware.elf | egrep 'updateGyr|fusion_sample|mahony_|comp_'
 ```
 
 GNU ld **region-list overflow** (`>FLASH FLASH_NZW`) is **not** supported by this toolchain’s `ld` 2.44 (syntax error), so placement is **explicit**.
+
+
+## Multi-algorithm selection
+
+### Algo IDs (`u32`)
+
+| ID | Name | Execute from |
+|----|------|--------------|
+| `0` / `ALGO_VQF` | VQF (default) | Zero-wait Flash (not copied to SRAM) |
+| `1` / `ALGO_MAHONY` | Mahony AHRS 6DOF | ALGO_RAM (SRAM) after boot copy |
+| `2` / `ALGO_COMPLEMENTARY` | Complementary filter 6DOF | ALGO_RAM (SRAM) after boot copy |
+| invalid / erased | treated as VQF | ZW |
+
+### Flash flag (`algo_cfg_t` @ `0x00037000`)
+
+| Field | Type | Value |
+|-------|------|-------|
+| magic | u32 | `0x414C474F` (`'ALGO'`) |
+| version | u32 | `1` |
+| algo_id | u32 | 0 / 1 / 2 |
+| checksum | u32 | `magic ^ version ^ algo_id` |
+
+- **CPU map / read**: `ALGO_CFG_ADDR_CPU = 0x00037000`
+- **FPEC program/erase**: `ALGO_CFG_ADDR_FPEC = 0x08037000` (WCH Flash alias)
+- Erase granularity: standard **4 KB** page
+- APIs: `algo_cfg_read()` / `algo_cfg_write()` in `Platform/algo_cfg.c` (NZW)
+
+### How to change the flag
+
+1. **UART** (boot window ~1.5 s): send `SETALGO n\n` with `n=0|1|2`, then **reset** the MCU.
+2. **Host patch** (before flashing a `.bin` that spans to `0x37000`):
+   ```bash
+   python3 scripts/setalgo.py --id 1 build/firmware.bin
+   python3 scripts/setalgo.py --id 0 --print-openocd   # mww helpers
+   ```
+3. Prefer programming via ELF + separately poking the flag page (OpenOCD / WCH-Link), because `.algo_cfg` is **NOLOAD** and is not part of the normal image payload.
+
+### SRAM execute note
+
+Mahony + complementary are compiled into `.algo_text.*` with **VMA = ALGO_RAM**, **LMA = FLASH_NZW**. Startup copies `_salgo_ram_lma` → `[_salgo_ram, _ealgo_ram)` (both algos, ~3.2 KB). Function pointers in `fusion_algo_t` hold **RAM addresses**. VQF is **never** copied to SRAM.
+
+### Unified fusion API (`Middleware/fusion/`)
+
+```c
+typedef struct {
+  void (*init)(float sample_hz);
+  void (*update)(const float gyr[3], const float acc[3], float dt); /* rad/s, m/s2 */
+  void (*get_quat)(float q[4]); /* wxyz */
+} fusion_algo_t;
+```
+
+Boot: `fusion_boot_select()` reads the flag and sets `fusion_active`.
 
 ### FLASH enhance read mode
 
@@ -90,7 +146,7 @@ Public SPL bit headers do not fully document bit 24; the source of truth is WCH�
 ```
 
 Marked cold today: `platform_init`, UART/I2C/CAN init, `platform_uart_printf`, `lsm6dsv_init`, `main`.
-Marked hot: `vqf_sample_step`, `vqf_run_1khz`, `quat_to_euler_deg`, `platform_uart_write_bytes`, `platform_uart_send_euler_bin`, `platform_can_send_euler` via `FLASH_ZW`.
+Marked hot: `fusion_sample_step`, `fusion_run_1khz`, `quat_to_euler_deg`, VQF wrappers, `platform_uart_write_bytes`, `platform_uart_send_euler_bin`, `platform_can_send_euler` via `FLASH_ZW`.
 
 ---
 
@@ -119,7 +175,11 @@ Sensors/lsm6dsv/
   lsm6dsv.c/h
 Middleware/vqf-c/         # vendored dusking1/vqf-c (MIT)
   vqf.c / vqf.h
-  LICENSE / NOTICE / README.upstream.md
+Middleware/fusion/        # unified API + Mahony + complementary
+  fusion.h / fusion_vqf.c / fusion_select.c
+  mahony.c/h / complementary.c/h
+Platform/algo_cfg.h/.c    # Flash flag read/write
+scripts/setalgo.py        # host patch / OpenOCD helpers
 vendor/
   NOTICE
   mtkos-ch32v203-minimal/ # MIT，参考用薄寄存器头文件（非构建必需）
@@ -138,14 +198,13 @@ vendor/
 - 灵敏度：accel **0.122 mg/LSB**，gyro **70 mdps/LSB** → 输出 **m/s²** 与 **rad/s**（VQF 所需 SI 单位）
 - 宏：`LSM6DSV_ODR_HZ = 1000.0f`
 
-### Attitude filter: VQF-C (full VQF)
-- Vendored from **[DusKing1/vqf-c](https://github.com/DusKing1/vqf-c)** (MIT, Hugo Chiang) — full C port of **[dlaidig/vqf](https://github.com/dlaidig/vqf)** by **Daniel Laidig & Thomas Seel** (Information Fusion 2023).
-- API used: `initVqf` / `updateGyr` / `updateAcc` / `getQuat6D`（本工程 **不调用** `updateMag`）
-- **6DOF mode**：`initVqf(1/1000, 1/1000, 5.0f)` — `gyrTs`/`accTs` 对齐 LSM6DSV **1000 Hz** HAODR；大 `magTs` 且永不调用 `updateMag`
-- 单位约定：陀螺 **rad/s**，加速度 **m/s²**（驱动已转换）
-- 无磁计 → **偏航会漂移**（6DOF 正常现象）
-- 欧拉角（ZYX deg）在 **ZW** 热路径计算（`atan2f`/`asinf` 已链入 `.text_zw`）
-- **每采样**同时输出 UART 二进制包 + CAN 帧（1 kHz）；启动时 printf 横幅一次
+### Attitude filters (selectable)
+- **VQF** (default): vendored **[DusKing1/vqf-c](https://github.com/DusKing1/vqf-c)** — `initVqf(1/1000,1/1000,5.0)` 6DOF, no `updateMag`; runs in **ZW**
+- **Mahony 6DOF**: compact AHRS, default Kp=1.0 / Ki=0.0; runs in **ALGO_RAM**
+- **Complementary 6DOF**: gyro integrate + accel tilt (α≈0.02 @ 1 kHz); runs in **ALGO_RAM**
+- Units: gyro **rad/s**, accel **m/s²**; quat **wxyz**; Euler ZYX deg in ZW
+- No magnetometer → **yaw drifts** (expected for 6DOF)
+- Every sample: UART binary + CAN Euler @ 1 kHz
 
 ### UART binary packet @ 921600 (1 kHz)
 
@@ -171,9 +230,9 @@ vendor/
 Pins: **PA11=RX, PA12=TX**. Bitrate `#define PLATFORM_CAN_BITRATE 1000000` (APB1 72 MHz → BTR BRP=6, TS1=8, TS2=3, sample ≈75%). TX: non-blocking mailbox0; if busy after ≤2 polls, drop + `platform_can_drop_count++`. **Transceiver required.** USBD left off (SRAM share).
 
 ### main / 1 kHz 循环
-1. NZW：初始化时钟 / UART(921600) / I2C / CAN / IMU / VQF；打印启动横幅  
-2. WHO_AM_I 失败则打印错误并 **halt**  
-3. ZW：`vqf_run_1khz` 每 **1 ms**：`vqf_sample_step` → Euler → `platform_uart_send_euler_bin` + `platform_can_send_euler`  
+1. NZW：platform init → read algo flag → `fusion_boot_select` → boot log → optional `SETALGO` window  
+2. IMU init；`fusion_active->init(1000)`  
+3. ZW：`fusion_run_1khz` 每 **1 ms**：IMU → fusion update/get_quat → Euler → UART + CAN  
 
 ---
 
@@ -197,9 +256,9 @@ Prefer **ELF/HEX** for programming: the `.bin` spans `0x0000`–end of image and
 ### B. MounRiver Studio
 
 1. 新建 **CH32V203** 工程，芯片选 **CH32V203G6U6**（或同 D6）。  
-2. 将本仓库 `User/`、`Sensors/`、`Middleware/`、`Platform/` 加入工程；用本仓库 `Startup/link.ld` 替换默认链接脚本（**32K ZW + 192K NZW / 10K**）。  
-3. **可选**：从 MRS pack 加入 WCH SPL；若继续用 `Platform/` 寄存器实现，可不链 SPL 的 I2C/USART 源文件以免重复。  
-4. 包含路径加上 `Platform`、`Sensors/lsm6dsv`、`Middleware/vqf-c`。  
+2. 将本仓库 `User/`、`Sensors/`、`Middleware/`、`Platform/` 加入工程；用本仓库 `Startup/link.ld`（**32K ZW + 188K NZW + 4K algo_cfg / ALGO_RAM 4K + RAM 6K**）。  
+3. **可选**：从 MRS pack 加入 WCH SPL；若继续用 `Platform/` 可不链 SPL 的 I2C/USART。  
+4. 包含路径加上 `Platform`、`Sensors/lsm6dsv`、`Middleware/vqf-c`、`Middleware/fusion`。  
 5. 编译下载；串口 **921600** 收二进制包，或仅看启动横幅文本。
 
 ---
@@ -222,21 +281,21 @@ LSM6DSV 寄存器与 WHO_AM_I 参考 ST 公开资料（lsm6dsv-pid / 数据手�
 
 本仓库应用代码：MIT（见 `LICENSE`）。`Middleware/vqf-c/` 遵循其上游 MIT（Hugo Chiang）；芯片厂商 SPL 与 ST 驱动头文件各自遵循原许可证。
 
-## 实测体积（本机交叉编译，1 kHz 全热路径 ZW）
+## 实测体积（本机交叉编译，multi-algo）
 
-工具链：`riscv64-unknown-elf-gcc` 14.2（Debian/Ubuntu apt）+ picolibc，`-Os -fno-math-errno -ffunction-sections -fdata-sections --gc-sections`，`rv32imac_zicsr` / `ilp32`。
+工具链：`riscv64-unknown-elf-gcc` 14.2 + picolibc，`-Os`，`rv32imac_zicsr` / `ilp32`。
 
 | 项 | 数值 |
 |---|---|
-| Links cleanly? | **Yes**（无 ZW overflow） |
+| Links cleanly? | **Yes** |
 | ODR / outputs | **1000 Hz** HAODR; UART binary + CAN Euler every sample |
-| UART baud | **921600** |
-| CAN | **1 Mbit/s**, std ID **0x321**, PA11/PA12 |
-| FLASH zero-wait used (`.init`+`.vector`+`.text_zw`) | **~24780 B** / 32768 B (~75.6%) |
-| FLASH_NZW used (`.text_nzw`+`.text`) | **~15516 B** / 196608 B (~7.9%) |
-| Berkeley `text` | **~40296 B** |
-| `data` | **8 B** |
-| RAM (`data`+`bss`+1 KB stack) | **~1612 B** / 10 KB |
-| `make verify-zw` | **OK** — sample/euler/uart_bin/can_tx + `atan2f`/`asinf` **无 jal ≥ 0x8000** |
+| Algo flag | **`0x00037000`** (FPEC `0x08037000`), magic `ALGO` |
+| ALGO_RAM reserved | **4096 B** @ `0x20000000` |
+| `.algo_ram` used | **3184 B** (Mahony ≈1434 B + Comp ≈1750 B) |
+| FLASH ZW (`.init`+`.vector`+`.text_zw`) | **~24868 B** / 32768 B (~75.9%) |
+| FLASH_NZW (`.text_nzw`+`.text`+`.fini`) | **~16892 B** / 192512 B |
+| Berkeley `text` / `data` / `bss` | **~44944 / 24 / 1648** |
+| Stack | **1024 B** (≥768) in 6 KB RAM region |
+| `make verify-zw` | **OK** — VQF hot path ZW; Mahony/Comp in ALGO_RAM |
 
-结论：完整 `dusking1/vqf-c` 1 kHz 热路径 + Euler libm + UART/CAN TX **可装入 32K R0WAIT**（约 8 KB 余量）；冷 init/printf 留在 NZW；`SystemInit` 仍启用 FLASH enhance read。
+结论：默认 VQF 仍在 32K R0WAIT；交替算法在 SRAM 执行；1 kHz UART+CAN 路径保持。

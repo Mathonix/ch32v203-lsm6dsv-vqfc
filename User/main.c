@@ -1,25 +1,28 @@
 /**
- * CH32V203G6U6 + LSM6DSV + VQF-C (dusking1/vqf-c full VQF) demo
+ * CH32V203G6U6 + LSM6DSV + multi-algo fusion demo
  * - I2C1: PB6=SCL, PB7=SDA, LSM6DSV @ 0x6A (SA0=GND)
  * - USART1: PA9=TX @ 921600 binary Euler @ 1 kHz (+ boot banner via printf)
  * - CAN1: PA11=RX, PA12=TX @ 1 Mbit, std ID 0x321, Euler millideg @ 1 kHz
- * - 6DOF only: no magnetometer; initVqf(..., magTs=5.0f), never call updateMag
+ * - Default algo: VQF from zero-wait Flash (not copied to SRAM)
+ * - Alternates (Mahony / complementary): NZW LMA → ALGO_RAM, execute from SRAM
  *
- * Units (VQF / Laidig–Seel): gyroscope rad/s, accelerometer m/s².
- * LSM6DSV driver already converts to those SI units.
+ * Units: gyroscope rad/s, accelerometer m/s².
+ * Sample rate: LSM6DSV HAODR true 1000 Hz.
  *
- * Sample rate: LSM6DSV HAODR true 1000 Hz → gyrTs = accTs = 1/1000 s.
- * Hot path (sample + Euler + UART binary + CAN TX) lives in zero-wait Flash
- * (.text.hot / .text_zw, addresses < 0x8000).
+ * UART command (boot window ~1.5 s, or anytime before SETALGO finishes):
+ *   SETALGO n\n   with n=0 VQF, 1 Mahony, 2 complementary — programs Flash flag,
+ *   then soft-hint to reset (user power-cycles / NRST).
  */
 #include "platform.h"
 #include "flash_nzw.h"
 #include "flash_zw.h"
 #include "lsm6dsv.h"
-#include "vqf.h"
+#include "fusion.h"
+#include "algo_cfg.h"
 
 #include <math.h>
 #include <stdint.h>
+#include <string.h>
 
 #ifndef VQF_UART_ASCII_DEBUG
 #define VQF_UART_ASCII_DEBUG 0
@@ -28,7 +31,7 @@
 /** Quaternion (w,x,y,z) → roll/pitch/yaw in degrees (aerospace ZYX). ZW. */
 FLASH_ZW static void quat_to_euler_deg(const float q[4], float *roll, float *pitch, float *yaw)
 {
-    const float rad2deg = 57.2957795f; /* 180/pi; avoid M_PI for newlib-nano */
+    const float rad2deg = 57.2957795f;
     const float w = q[0], x = q[1], y = q[2], z = q[3];
     const float sinr_cosp = 2.0f * (w * x + y * z);
     const float cosr_cosp = 1.0f - 2.0f * (x * x + y * y);
@@ -48,8 +51,7 @@ FLASH_ZW static void quat_to_euler_deg(const float q[4], float *roll, float *pit
 }
 
 #if VQF_UART_ASCII_DEBUG
-/** Optional low-rate ASCII (NZW) — off by default; printf cannot sustain 1 kHz. */
-FLASH_NZW static void vqf_uart_print_status(const float q[4])
+FLASH_NZW static void fusion_uart_print_status(const float q[4])
 {
     float roll, pitch, yaw;
     quat_to_euler_deg(q, &roll, &pitch, &yaw);
@@ -61,31 +63,25 @@ FLASH_NZW static void vqf_uart_print_status(const float q[4])
 #endif
 
 /**
- * 1 kHz hot body in zero-wait Flash: IMU read → updateGyr → updateAcc → getQuat6D.
- * Returns 0 on success, negative on IMU read error.
+ * 1 kHz hot body in zero-wait Flash: IMU → fusion->update → get_quat.
+ * VQF callees stay ZW; Mahony/Comp run from ALGO_RAM via function pointers.
  */
-FLASH_ZW int vqf_sample_step(lsm6dsv_t *imu, float q_out[4])
+FLASH_ZW int fusion_sample_step(lsm6dsv_t *imu, float q_out[4], float dt)
 {
     float acc[3], gyr[3];
     if (lsm6dsv_read_acc_gyr(imu, acc, gyr) != 0) {
         return -1;
     }
-    /* SI units from driver: gyr rad/s, acc m/s² — as required by VQF */
-    updateGyr(gyr);
-    updateAcc(acc);
-    /* 6DOF: do not call updateMag */
-    getQuat6D(q_out);
+    fusion_active->update(gyr, acc, dt);
+    fusion_active->get_quat(q_out);
     return 0;
 }
 
-/**
- * Forever 1 kHz sample loop — entire function in ZW.
- * Each sample: Euler → UART binary packet + CAN frame.
- */
-FLASH_ZW void vqf_run_1khz(lsm6dsv_t *imu)
+FLASH_ZW void fusion_run_1khz(lsm6dsv_t *imu)
 {
     uint32_t last_ms = platform_millis();
-    const uint32_t sample_period_ms = 1u; /* 1000 Hz wall-clock cadence */
+    const uint32_t sample_period_ms = 1u;
+    const float dt = 1.0f / LSM6DSV_ODR_HZ;
     float q[4];
     uint16_t seq = 0u;
 #if VQF_UART_ASCII_DEBUG
@@ -100,7 +96,7 @@ FLASH_ZW void vqf_run_1khz(lsm6dsv_t *imu)
         }
         last_ms = now;
 
-        if (vqf_sample_step(imu, q) != 0) {
+        if (fusion_sample_step(imu, q, dt) != 0) {
             platform_delay_ms(1);
             continue;
         }
@@ -114,21 +110,103 @@ FLASH_ZW void vqf_run_1khz(lsm6dsv_t *imu)
 #if VQF_UART_ASCII_DEBUG
         if ((uint32_t)(now - last_print) >= print_period_ms) {
             last_print = now;
-            vqf_uart_print_status(q);
+            fusion_uart_print_status(q);
         }
 #endif
+    }
+}
+
+/** Parse "SETALGO n" from a line buffer; returns 0 and sets *id_out on success. */
+FLASH_NZW static int parse_setalgo(const char *line, uint32_t *id_out)
+{
+    const char *p = line;
+    while (*p == ' ' || *p == '\t') {
+        p++;
+    }
+    if (strncmp(p, "SETALGO", 7) != 0) {
+        return -1;
+    }
+    p += 7;
+    while (*p == ' ' || *p == '\t') {
+        p++;
+    }
+    if (*p < '0' || *p > '2' || (*(p + 1) != '\0' && *(p + 1) != '\r' && *(p + 1) != '\n' && *(p + 1) != ' ')) {
+        return -2;
+    }
+    *id_out = (uint32_t)(*p - '0');
+    return 0;
+}
+
+/**
+ * Drain UART for up to wait_ms looking for a SETALGO line.
+ * On success, programs Flash and prints reboot hint.
+ */
+FLASH_NZW static void fusion_poll_setalgo_window(uint32_t wait_ms)
+{
+    char buf[32];
+    unsigned n = 0;
+    uint32_t t0 = platform_millis();
+    platform_uart_printf("SETALGO window %u ms (send SETALGO 0|1|2)\n", (unsigned)wait_ms);
+
+    while ((uint32_t)(platform_millis() - t0) < wait_ms) {
+        int c = platform_uart_getc_nonblock();
+        if (c < 0) {
+            continue;
+        }
+        if (c == '\r') {
+            continue;
+        }
+        if (c == '\n') {
+            buf[n < sizeof(buf) ? n : sizeof(buf) - 1u] = '\0';
+            uint32_t id = 0;
+            if (n > 0 && parse_setalgo(buf, &id) == 0) {
+                platform_uart_printf("Programming algo_id=%u ...\n", (unsigned)id);
+                int rc = algo_cfg_write(id);
+                if (rc == 0) {
+                    platform_uart_printf("OK — reset MCU to apply (%s)\n",
+                                         fusion_algo_name((algo_id_t)id));
+                } else {
+                    platform_uart_printf("Flash write failed (%d)\n", rc);
+                }
+            }
+            n = 0;
+            continue;
+        }
+        if (n + 1u < sizeof(buf)) {
+            buf[n++] = (char)c;
+        } else {
+            n = 0;
+        }
     }
 }
 
 FLASH_NZW int main(void)
 {
     platform_init();
-    platform_uart_printf("\nCH32V203 + LSM6DSV + VQF-C (6DOF, 1 kHz ZW)\n");
+    platform_uart_printf("\nCH32V203 + LSM6DSV + multi-algo fusion (6DOF, 1 kHz)\n");
     platform_uart_printf("I2C1 PB6/PB7, USART1 PA9 @ %u baud binary Euler\n",
                          (unsigned)PLATFORM_UART_BAUD);
-    platform_uart_printf("CAN1 PA11/PA12 @ %u bit/s, std ID 0x%03X (transceiver req.)\n",
+    platform_uart_printf("CAN1 PA11/PA12 @ %u bit/s, std ID 0x%03X\n",
                          (unsigned)PLATFORM_CAN_BITRATE, (unsigned)PLATFORM_CAN_STD_ID);
-    platform_uart_printf("USBD off (CAN shares SRAM). Packet: see README.\n");
+
+    algo_cfg_t cfg;
+    int cfg_rc = algo_cfg_read(&cfg);
+    fusion_boot_select();
+    if (cfg_rc != 0) {
+        platform_uart_printf("Algo flag: missing/invalid @ 0x%08X → default VQF (ZW)\n",
+                             (unsigned)ALGO_CFG_ADDR_CPU);
+    } else {
+        platform_uart_printf("Algo flag: id=%u checksum OK @ 0x%08X\n",
+                             (unsigned)cfg.algo_id, (unsigned)ALGO_CFG_ADDR_CPU);
+    }
+    platform_uart_printf("Selected: %s\n", fusion_algo_name(fusion_active_id));
+
+    fusion_poll_setalgo_window(1500u);
+
+    /* Re-read in case SETALGO wrote a new flag (takes effect next boot;
+     * still re-select so a same-boot soft switch works after write + re-init). */
+    fusion_boot_select();
+    platform_uart_printf("Active after window: %s\n", fusion_algo_name(fusion_active_id));
 
     lsm6dsv_t imu;
     int rc = lsm6dsv_init(&imu, LSM6DSV_I2C_ADDR_SA0_L);
@@ -148,16 +226,14 @@ FLASH_NZW int main(void)
     platform_uart_printf("LSM6DSV OK (WHO_AM_I=0x%02X, ODR=%.0f Hz HAODR)\n",
                          LSM6DSV_WHO_AM_I_VALUE, (double)LSM6DSV_ODR_HZ);
 
-    /* Match LSM6DSV 1000 Hz HAODR; large magTs + no updateMag => 6DOF mode */
-    const float gyrTs = 1.0f / LSM6DSV_ODR_HZ;
-    const float accTs = 1.0f / LSM6DSV_ODR_HZ;
-    const float magTs = 5.0f;
-    initVqf(gyrTs, accTs, magTs);
-    platform_uart_printf("VQF init: gyrTs=accTs=1/%.0f, magTs=5.0 (no mag)\n",
-                         (double)LSM6DSV_ODR_HZ);
-    platform_uart_printf("Hot path ZW: sample+euler+uart_bin+can_tx @ 1 kHz\n");
+    fusion_active->init(LSM6DSV_ODR_HZ);
+    platform_uart_printf("Fusion init @ %.0f Hz\n", (double)LSM6DSV_ODR_HZ);
+    if (fusion_active_id == ALGO_VQF) {
+        platform_uart_printf("Hot path: VQF in ZW Flash; sample+euler+uart+can @ 1 kHz\n");
+    } else {
+        platform_uart_printf("Hot path: algo in ALGO_RAM (SRAM); I/O+euler in ZW @ 1 kHz\n");
+    }
 
-    /* Never return — 1 kHz loop executes from FLASH_ZW */
-    vqf_run_1khz(&imu);
+    fusion_run_1khz(&imu);
     return 0;
 }

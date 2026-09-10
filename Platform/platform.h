@@ -44,6 +44,10 @@ int platform_i2c_read(uint8_t addr7, uint8_t reg, uint8_t *data, uint16_t len);
 void platform_uart_write(const char *s);
 void platform_uart_printf(const char *fmt, ...);
 
+/** Non-blocking UART RX; returns 0..255 or -1 if empty. */
+int platform_uart_getc_nonblock(void);
+
+
 /**
  * Polling TXE binary write (FLASH_ZW). No CR/LF translation — for 1 kHz packets.
  */

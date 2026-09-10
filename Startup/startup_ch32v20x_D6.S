@@ -120,6 +120,18 @@ handle_reset:
   addi a1, a1, 4
   bltu a1, a2, 1b
 2:
+  /* copy .algo_ram (Mahony/Comp LMA → ALGO_RAM VMA) */
+  la a0, _salgo_ram_lma
+  la a1, _salgo_ram
+  la a2, _ealgo_ram
+  beq a1, a2, 2f
+1:
+  lw t0, 0(a0)
+  sw t0, 0(a1)
+  addi a0, a0, 4
+  addi a1, a1, 4
+  bltu a1, a2, 1b
+2:
   /* clear .bss */
   la a0, _sbss
   la a1, _ebss

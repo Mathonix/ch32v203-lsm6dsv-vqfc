@@ -1,21 +1,16 @@
-# CH32V203G6U6 + LSM6DSV + VQF-C — GCC Makefile
+# CH32V203G6U6 + LSM6DSV + multi-algo fusion — GCC Makefile
 # Toolchain: xPack / MRS riscv-none-elf-gcc or riscv-none-embed-gcc
 #
 #   make            # build build/firmware.elf
 #   make flash      # optional: openocd + wch-link (adjust OPENOCD)
+#   make verify-zw  # VQF hot-path symbols still in R0WAIT
 #
-# MRS path: create a CH32V203 project, add User/Sensors/Middleware/Platform
-# sources, use Startup/link.ld (32K ZW + 192K NZW / 10K RAM). SPL not required for this Makefile.
-#
-# Flash: G6U6 R0WAIT=32KB zero-wait + ~192KB non-zero-wait (total CodeFlash 224KB).
-# Startup/link.ld places vectors/reset/SystemInit + FULL VQF 1 kHz hot call graph
-# (updateGyr/updateAcc + callees + soft-float/libm) in FLASH (ZW < 0x8000).
-# Cold VQF (init/mag/setters) + printf/euler in FLASH_NZW @ 0x8000.
+# Flash: G6U6 R0WAIT=32KB zero-wait + ~188KB NZW code + 4KB algo_cfg @ 0x37000
+# ALGO_RAM 3KB @ 0x20000000 for Mahony/Comp SRAM execute; RAM 7KB remainder.
 
 TARGET   ?= firmware
 BUILD    ?= build
 
-# Prefer xPack / MRS names, then Debian/Ubuntu riscv64-unknown-elf
 PREFIX   ?= riscv-none-elf-
 ifeq ($(shell which $(PREFIX)gcc 2>/dev/null),)
   PREFIX := riscv-none-embed-
@@ -24,7 +19,6 @@ ifeq ($(shell which $(PREFIX)gcc 2>/dev/null),)
   PREFIX := riscv64-unknown-elf-
 endif
 
-# Debian gcc-riscv64-unknown-elf ships picolibc (no nano.specs)
 SPECS := --specs=nano.specs --specs=nosys.specs
 ifeq ($(PREFIX),riscv64-unknown-elf-)
   SPECS := --specs=picolibc.specs
@@ -46,7 +40,8 @@ INCLUDES := \
   -IUser \
   -IPlatform \
   -ISensors/lsm6dsv \
-  -IMiddleware/vqf-c
+  -IMiddleware/vqf-c \
+  -IMiddleware/fusion
 
 CFLAGS   := $(MCUFLAGS) $(DEFS) $(INCLUDES) -Os -g3 -Wall -Wextra
 CFLAGS   += -fno-math-errno
@@ -63,8 +58,13 @@ C_SRCS := \
   User/system_ch32v20x.c \
   User/ch32v20x_it.c \
   Platform/platform_ch32v203.c \
+  Platform/algo_cfg.c \
   Sensors/lsm6dsv/lsm6dsv.c \
-  Middleware/vqf-c/vqf.c
+  Middleware/vqf-c/vqf.c \
+  Middleware/fusion/fusion_vqf.c \
+  Middleware/fusion/fusion_select.c \
+  Middleware/fusion/mahony.c \
+  Middleware/fusion/complementary.c
 
 AS_SRCS := Startup/startup_ch32v20x_D6.S
 
@@ -101,11 +101,9 @@ clean:
 tree:
 	@find . -type f -not -path './.git/*' -not -path './build/*' -not -path './vendor/mtkos-ch32v203-minimal/.git/*' | sort
 
-# Example OpenOCD flash (WCH-Link); adjust scripts to your install
 OPENOCD ?= openocd
 flash: $(BUILD)/$(TARGET).elf
 	$(OPENOCD) -f wch-riscv.cfg -c "program $(BUILD)/$(TARGET).elf verify reset exit"
 
-# Verify every 1 kHz hot symbol + jal targets from updateGyr/updateAcc are < 0x8000
 verify-zw: $(BUILD)/$(TARGET).elf
 	@python3 scripts/verify_zw_hotpath.py $(BUILD)/$(TARGET).elf

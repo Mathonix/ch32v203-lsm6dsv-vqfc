@@ -49,9 +49,17 @@
 #define FLASH_CTLR        REG32(FLASH_R_BASE + 0x10)
 #define FLASH_KEY1        0x45670123u
 #define FLASH_KEY2        0xCDEF89ABu
+#define FLASH_STATR       REG32(FLASH_R_BASE + 0x0Cu)
+#define FLASH_ADDR        REG32(FLASH_R_BASE + 0x14u)
+#define FLASH_CTLR_PG     (1u << 0)
+#define FLASH_CTLR_PER    (1u << 1)
+#define FLASH_CTLR_STRT   (1u << 6)
 #define FLASH_CTLR_LOCK   (1u << 7)
 #define FLASH_CTLR_ENHANCE_READ (1u << 24) /* FLASH_Enhance_Mode(ENABLE) */
 #define FLASH_CTLR_ENHANCE_CLK  (1u << 25) /* FLASH_Access_SYSTEM */
+#define FLASH_STATR_BSY   (1u << 0)
+#define FLASH_STATR_WRPRTERR (1u << 4)
+#define FLASH_STATR_EOP   (1u << 5)
 
 /* ---- EXTEN (CH32 specific) ---- */
 #define EXTEN_CTR       REG32(0x40023800u)
@@ -82,6 +90,7 @@
 #define USART1_BRR      REG32(USART1_BASE + 0x08)
 #define USART1_CTLR1    REG32(USART1_BASE + 0x0C)
 #define USART_TC        (1u << 6)
+#define USART_RXNE      (1u << 5)
 #define USART_TXE       (1u << 7)
 #define USART_UE        (1u << 13)
 #define USART_TE        (1u << 3)

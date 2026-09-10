@@ -7,18 +7,11 @@
  * (FLASH base 0x00000000 as used by Qingke / this project).
  *
  * Layout:
- *   FLASH (32K ZW):
- *     .init, .vector, handle_reset, IRQ stubs, SystemInit,
- *     FULL VQF 1 kHz hot call graph + IMU/I2C/timebase + soft-float/libm
- *     needed by updateGyr/updateAcc, plus .text.hot (vqf_sample_step).
- *   FLASH_NZW (192K):
- *     cold VQF (init/mag/setters), printf/main shell, remaining libc
- *
- * Note: this toolchain's ld (binutils 2.44) rejects MEMORY region-list
- * overflow (`>FLASH FLASH_NZW`); we place explicitly instead.
- *
- * Match order: cold vqf symbols are claimed into FLASH_NZW FIRST so the
- * later "remaining vqf.o" rule in .text_zw only pulls the hot graph.
+ *   FLASH (32K ZW): vectors/reset/SystemInit + VQF 1 kHz hot graph + soft-float
+ *   FLASH_NZW (188K): cold code; Mahony/Comp stored here as LMA of .algo_ram
+ *   ALGO_CFG (4K @ 0x37000): persistent algo select flag (NOLOAD)
+ *   ALGO_RAM (4K @ 0x20000000): SRAM execute window for alternate algos
+ *   RAM (6K @ 0x20001000): .data / .bss / stack (1024B)
  */
 ENTRY(_start)
 
@@ -27,19 +20,15 @@ PROVIDE(_stack_size = __stack_size);
 
 MEMORY
 {
-  /* Zero-wait R0WAIT */
   FLASH (rx)     : ORIGIN = 0x00000000, LENGTH = 32K
-  /* Non-zero-wait remainder of 224 KB CodeFlash */
-  FLASH_NZW (rx) : ORIGIN = 0x00008000, LENGTH = 192K
-  RAM (xrw)      : ORIGIN = 0x20000000, LENGTH = 10K
+  FLASH_NZW (rx) : ORIGIN = 0x00008000, LENGTH = 188K
+  ALGO_CFG (r)   : ORIGIN = 0x00037000, LENGTH = 4K
+  ALGO_RAM (xrw) : ORIGIN = 0x20000000, LENGTH = 4K
+  RAM (xrw)      : ORIGIN = 0x20001000, LENGTH = 6K
 }
 
 SECTIONS
 {
-  /*
-   * Claim cold / init-only VQF symbols into NZW BEFORE .text_zw pulls the
-   * rest of vqf.o. VMA is FLASH_NZW @ 0x8000 regardless of script order.
-   */
   .text_nzw :
   {
     . = ALIGN(4);
@@ -48,7 +37,6 @@ SECTIONS
     *(.rodata_nzw)
     *(.rodata_nzw.*)
 
-    /* Cold VQF only (init-time / mag / getters unused on 6DOF hot path) */
     build/Middleware/vqf-c/vqf.o(.text.updateMag .text.updateMag.*
                                  .text.getQuat9D .text.getQuat9D.*
                                  .text.getDelta .text.getDelta.*
@@ -92,11 +80,9 @@ SECTIONS
             .text.resetState .text.resetState.*
             .text.init_params .text.init_params.*)
 
-    /* VQF cold rodata (kept with cold text for locality) — hot rodata still OK in NZW */
     . = ALIGN(4);
   } >FLASH_NZW AT>FLASH_NZW
 
-  /* ---- Zero-wait: reset trampoline ---- */
   .init :
   {
     _sinit = .;
@@ -106,17 +92,12 @@ SECTIONS
     _einit = .;
   } >FLASH AT>FLASH
 
-  /* ---- Zero-wait: vector table ---- */
   .vector :
   {
     *(.vector)
     . = ALIGN(64);
   } >FLASH AT>FLASH
 
-  /*
-   * Zero-wait: reset / IRQ / SystemInit + FULL 1 kHz VQF hot graph +
-   * IMU/I2C/timebase + soft-float / libm used by updateGyr/updateAcc.
-   */
   .text_zw :
   {
     . = ALIGN(4);
@@ -127,13 +108,11 @@ SECTIONS
     *(.text.hot)
     *(.text.hot.*)
 
-    /* Remaining vqf.o text = hot call graph (cold claimed above) */
     build/Middleware/vqf-c/vqf.o(.text .text.*)
     */vqf.o(.text .text.*)
     */*/vqf.o(.text .text.*)
     */*/*/vqf.o(.text .text.*)
 
-    /* IMU / I2C / timebase / UART binary / CAN TX (high-rate) */
     *(.text.lsm6dsv_read*)
     *(.text.platform_i2c*)
     *(.text.platform_millis*)
@@ -144,11 +123,6 @@ SECTIONS
     *(.text.millideg_i16*)
     *(.text.systick*)
 
-    /*
-     * Soft-float + save-restore from libgcc (VQF is -fno-hard-float).
-     * Prefer common sf3/df3 members; full libgcc .text* is acceptable if
-     * ZW headroom remains (G6U6 has 32K).
-     */
     *libgcc.a:*addsf3*(.text*)
     *libgcc.a:*subsf3*(.text*)
     *libgcc.a:*mulsf3*(.text*)
@@ -173,7 +147,6 @@ SECTIONS
     *libgcc.a:*fixunssfsi*(.text*)
     *libgcc.a:*floatunsisf*(.text*)
 
-    /* libm / string helpers reached from updateGyr / updateAcc / filterVec */
     *libc.a:*libm_machine_riscv_s_sqrt*(.text*)
     *libc.a:*libm_machine_riscv_sf_sqrt*(.text*)
     *libc.a:*libm_math_s_acos*(.text*)
@@ -195,8 +168,8 @@ SECTIONS
     *libc.a:*libm_machine_riscv_s_isnan*(.text*)
     *libc.a:*libm_machine_riscv_sf_isnan*(.text*)
     *libc.a:*memset*(.text*)
+    *libc.a:*memcpy*(.text*)
 
-    /* Also match via libm.a if the toolchain splits math out of libc */
     *libm.a:*sqrt*(.text*)
     *libm.a:*acos*(.text*)
     *libm.a:*asin*(.text*)
@@ -212,6 +185,17 @@ SECTIONS
     . = ALIGN(4);
   } >FLASH AT>FLASH
 
+  /*
+   * Catch-all NZW text/rodata — exclude mahony/complementary objects so their
+   * .text.algo.* / .rodata.algo.* land in .algo_ram (VMA=ALGO_RAM, LMA=NZW).
+   * EXCLUDE also keeps their default .rodata (vtables) out; those vtables are
+   * pulled explicitly into .text below via named sections if needed.
+   *
+   * Vtables (fusion_algo_mahony / fusion_algo_comp) are normal .rodata in
+   * those .o files — we WANT them in NZW XIP, not in ALGO_RAM. So only exclude
+   * .text.algo* / .rodata.algo* patterns by claiming .algo_ram AFTER with
+   * explicit section names, and exclude those section names from wildcards.
+   */
   .text :
   {
     . = ALIGN(4);
@@ -230,9 +214,45 @@ SECTIONS
     . = ALIGN(4);
   } >FLASH_NZW AT>FLASH_NZW
 
-  /* Contiguous image: VMA end of last flash section == LMA for .data */
-  PROVIDE(_etext = .);
-  PROVIDE(_data_lma = .);
+  /*
+   * Alternate fusion algos @ end of NZW image (LMA), execute from ALGO_RAM (VMA).
+   * Startup copies _salgo_ram_lma → [_salgo_ram, _ealgo_ram).
+   * Both Mahony + complementary fit in 3K — always copy both.
+   *
+   * IMPORTANT: must come AFTER .text/.fini so FLASH_NZW VMA==LMA for XIP code.
+   * Input sections .text.algo* must not have been claimed by .text above.
+   * GNU ld sorts more-specific input section names: we rely on .text.* also
+   * matching .text.algo.mahony — so we MUST claim .algo_ram BEFORE .text, BUT
+   * that breaks VMA==LMA. Solution: use INSERT or rename sections to not match.
+   *
+   * Practical fix used here: section names .algo_text.mahony (no .text. prefix)
+   * — see flash attributes in mahony.c / complementary.c.
+   */
+  .algo_ram : ALIGN(4)
+  {
+    PROVIDE(_salgo_ram = .);
+    *(.algo_text.mahony)
+    *(.algo_text.mahony.*)
+    *(.algo_rodata.mahony)
+    *(.algo_rodata.mahony.*)
+    *(.algo_text.comp)
+    *(.algo_text.comp.*)
+    *(.algo_rodata.comp)
+    *(.algo_rodata.comp.*)
+    *(.algo_text)
+    *(.algo_text.*)
+    *(.algo_rodata)
+    *(.algo_rodata.*)
+    . = ALIGN(4);
+    PROVIDE(_ealgo_ram = .);
+  } >ALGO_RAM AT>FLASH_NZW
+
+  PROVIDE(_salgo_ram_lma = LOADADDR(.algo_ram));
+
+  /* .data LMA = end of last Flash-resident LMA (.algo_ram load end).
+   * Location counter '.' after .algo_ram is ALGO_RAM VMA — use LOADADDR+SIZE. */
+  PROVIDE(_etext = LOADADDR(.algo_ram) + SIZEOF(.algo_ram));
+  PROVIDE(_data_lma = _etext);
 
   .data : AT(_etext)
   {
@@ -267,6 +287,12 @@ SECTIONS
 
   PROVIDE(_end = _ebss);
   PROVIDE(end = .);
+
+  .algo_cfg (NOLOAD) :
+  {
+    KEEP(*(.algo_cfg))
+    . = ALIGN(4);
+  } >ALGO_CFG
 
   .stack ORIGIN(RAM) + LENGTH(RAM) - __stack_size :
   {
