@@ -4,7 +4,7 @@
 
 > **Schematic note:** 原理图主控为 **AT32F423KCU7-4**；本仓库固件目标为 **CH32V203**，在 AF 允许处对齐同名网络（尤其 **LSM SPI PA4–PA7**）。UART/CAN 在 CH32 上的复用与 AT32 不同，见下表。
 
-Short English: Bare-metal CH32V203G6U6 + LSM6DSV (**SPI** mode 3) with selectable 6DOF fusion (**vqf_fixed** Full 6D fixed-point default in **HOT_RAM SRAM** on `feat/vqf-fixedpoint-rv`; **Mahony** / **complementary** in **ALGO_RAM**). **1 kHz** Euler as **int16 millideg** on **USART2 binary @ 921600** (magic `A5 5B`) + **CAN1 @ 1 Mbit** (`0x321`). Algo flag in NZW @ `0x37000`.
+Short English: Bare-metal CH32V203G6U6 + LSM6DSV (**SPI** mode 3) with selectable 6DOF fusion (**vqf_fixed** Full 6D fixed-point default in **HOT_RAM SRAM** on `feat/vqf-fixedpoint-rv`; **Mahony** / **complementary** in **ALGO_RAM**). LSM **GY HAODR 4 kHz / XL 1 kHz** async; **vqf_fixed_update_gyr @ 4 kHz**, **update_acc + UART/CAN Euler @ 1 kHz** (int16 millideg, USART2 `A5 5B` @ 921600 + CAN1 `0x321` @ 1 Mbit). Algo flag in NZW @ `0x37000`. Mag/9D **off** (`VQF_FIXED_ENABLE_MAG=0`).
 
 通信帧格式见 [docs/protocol.md](docs/protocol.md)（UART / CAN，对照 CH32V203G6U6 原理图）。
 
@@ -39,7 +39,7 @@ Short English: Bare-metal CH32V203G6U6 + LSM6DSV (**SPI** mode 3) with selectabl
 | UART_RX | PA1 (USART4) | **PA3** USART2_RX | CH32 RM: PA1=USART2_RTS only — no RX AF |
 | CAN_RX | PA2 (CAN2) | **PA11** CAN1 Remap1 | CH32 CAN remaps: PA11/12, PB8/9, PD0/1 only |
 | CAN_TX | PA3 (CAN2) | **PA12** CAN1 Remap1 | No CAN AF on PA2/PA3 |
-| MAG_SCL/SDA | PB6/PB7 | *(not init)* | Mag I2C out of scope |
+| MAG_SCL/SDA | PB6/PB7 | *(not init)* | IST8310 stub API only; 9D off (HOT_RAM/budget) |
 | USB_DM/DP | PA11/PA12 | USBD off; pins used by CAN Remap1 | |
 
 UART: **USART2 @ 921600** 8N1 binary Euler + boot printf. CAN: **1 Mbit/s**, std ID **`0x321`**, transceiver required.
@@ -59,7 +59,7 @@ WCH datasheet note: **advertised Flash bytes = zero-wait R0WAIT only**. For V203
 | `FLASH` | `0x00000000` | 32K | Zero-wait R0WAIT (boot + `__divdi3` + HOT_RAM LMA) |
 | `FLASH_NZW` | `0x00008000` | 188K | Non-zero-wait CodeFlash (code + `.algo_ram` LMA) |
 | `ALGO_CFG` | `0x00037000` | 4K | Persistent algo select flag (NOLOAD; programmed at runtime) |
-| `HOT_RAM` | `0x20000000` | 4K | SRAM execute window for VQF-fxp 1 kHz hot path |
+| `HOT_RAM` | `0x20000000` | 4K | SRAM execute window for vqf_fixed 4k/1k hot path |
 | `ALGO_RAM` | `0x20001000` | 4K | SRAM execute window for Mahony + complementary |
 | `RAM` | `0x20002000` | 2K | `.data` / `.bss` / stack (1024 B) |
 
@@ -69,7 +69,7 @@ WCH datasheet note: **advertised Flash bytes = zero-wait R0WAIT only**. For V203
 |----------------|--------|----------|
 | `.init` / `.vector` | `FLASH` | Reset trampoline + vector table |
 | `.text_zw` | `FLASH` | `handle_reset`, `SystemInit`, `SysTick_Handler`, `memcpy`/`memset`, **`__divdi3` / `__udivdi3` / `__umoddi3`** (Option B) — **no soft-float/libm** |
-| `.text.hot_ram` | `HOT_RAM` AT>`FLASH` | VQF-fxp 1 kHz business: `fusion_run_1khz_fxp`, `vqfx_*`, quat helpers, SPI Q16, UART `A5 5B` + CAN i16, `platform_millis` |
+| `.text.hot_ram` | `HOT_RAM` AT>`FLASH` | vqf_fixed 4k/1k: `fusion_run_1khz`→4k1k body, `vqf_fixed_update_*`, LSM status/gyr/acc fixed reads, UART `A5 5B` + CAN i16 |
 | `.text_nzw` | `FLASH_NZW` | Cold/init + cold VQF (`vqfx_init`/float helpers) |
 | `.text` / `.fini` | `FLASH_NZW` | `main`, printf, `algo_cfg_*`, remaining libc |
 | `.algo_ram` | `ALGO_RAM` AT>`FLASH_NZW` | Mahony + complementary code (startup memcpy LMA→VMA) |
@@ -96,17 +96,19 @@ GNU ld **region-list overflow** (`>FLASH FLASH_NZW`) is **not** supported by thi
 
 ## Fixed-point VQF (`feat/vqf-fixedpoint-rv`)
 
-**Honesty label:** progressing toward **Full 6D fixed VQF** per design doc (`/workspace/req_doc.txt` / CH32V203G6U6 VQF-C 定点化实现设计). Sources: `Middleware/vqf_fixed/`. Legacy `Middleware/vqf-fxp/` is a **deprecated Q16 wrapper**.
+**Honesty label:** **Full 6D fixed VQF** wired at design rates (GY 4 kHz / XL 1 kHz). Sources: `Middleware/vqf_fixed/`. Legacy `Middleware/vqf-fxp/` is a **deprecated Q16 wrapper**.
 
-| Done | Remaining (design §19 steps 16–25) |
-|------|-------------------------------------|
-| §19.16 float VQF-C memory fixes (`FIXES.md`) | §19.24 mag / CORDIC (`VQF_FIXED_ENABLE_MAG=0`) |
-| Math / quat / DF-I biquad+residue / scaled LDLT scaffold | §19.23 real-board cycle map + tighter Flash budget |
-| updateGyr small-angle 4th-order poly + rest gyr LP | Independent **4 kHz gyro** HAODR (structure ready; still 1 kHz/1 kHz default) |
-| updateAcc LP + inclination + rest detector + rest/motion bias Kalman | **Float/fixed replay** harness (`tools/vqf_fixed_replay/` stub only) |
-| Wired 1 kHz HOT_RAM path + F25/F27 LSM helpers | Dynamic tau setters (intentionally unsupported) |
+| Done | Remaining / deferred |
+|------|----------------------|
+| Float VQF-C memory fixes (`FIXES.md`) | Mag / CORDIC / 9D — **off** (`VQF_FIXED_ENABLE_MAG=0`); IST8310 stub only |
+| Math / quat / DF-I biquad+residue / scaled LDLT | Real-board cycle map (§19.23) — needs HW |
+| updateGyr 4th-order poly + rest gyr LP @ 4 kHz coeffs | Dynamic tau setters (intentionally unsupported) |
+| updateAcc LP + inclination + rest + bias Kalman | Motion Kalman vs float still **>0.02°** RMS (see replay) |
+| LSM HAODR **GY=4 kHz / XL=1 kHz**; STATUS poll; UART/CAN @ 1 kHz only | INT1/INT2 / FIFO IRQ not used (polling) |
+| Host replay `tools/vqf_fixed_replay/` (real float+fixed link) | — |
+| `scripts/gen_vqf_fixed_coeffs.py` → `coeffs_{1k1k,4k1k}.h`; `gyr_hz>=3500` selects 4k | — |
 
-**Kalman accuracy vs float is unverified** until replay exists — do not claim bit-exact Laidig parity yet.
+**Replay honesty (host `make replay`):** static (0 gyr, +1 g) quat RMS **0.000°** (PASS &lt;0.02°). Mild synthetic motion 10 s quat RMS **≈0.48°** (max ≈1.36°) — **below** design target; bias-Kalman / IIR quantization not Laidig-parity yet. Do not claim bit-exact float match on dynamic data.
 
 ### Domains (design)
 
@@ -139,7 +141,9 @@ API: `lsm6dsv_read_acc_gyr_fixed()` (FLASH_ZW). Legacy `*_fxp` Q16 retained for 
 - Hot path: **no** soft-float (`__*sf3`) and **no** libm (`sinf`/`cosf`/`atan2f`/`asinf`/`sqrt`)
 - Small-angle Taylor sin/cos for gyro δq; fixed-point atan2/asin → millideg for Euler
 
-### UART / CAN @ 1 kHz
+### UART / CAN @ 1 kHz only
+
+Attitude packets are emitted on **accel cadence (1 kHz)**, not at 4 kHz gyro rate.
 
 | Bus | Format |
 |-----|--------|
@@ -148,14 +152,20 @@ API: `lsm6dsv_read_acc_gyr_fixed()` (FLASH_ZW). Legacy `*_fxp` Q16 retained for 
 
 Legacy float UART magic `A5 5A` (17 bytes) remains for Mahony/Comp NZW path only.
 
-### ZW size (before → after on this branch)
+### Mag / 9D status
 
-| Metric | Float VQF (`main` @ fbce22b) | VQF-fxp (this branch) |
-|--------|------------------------------|------------------------|
-| ZW (init+vector+text_zw) | **~24364 B** (~74% of 32K) | **~6548 B** (~20% of 32K) |
-| Soft-float / libm in ZW | yes (`__addsf3`, `atan2f`, …) | **none** (soft-float stays NZW for Mahony/Comp) |
+**Off.** `VQF_FIXED_ENABLE_MAG=0`. After 4 kHz wiring, HOT_RAM ≈ **48%** and ZW ≈ **30%** — enough for 6D, but mag CORDIC + disturbance rejection + I2C driver would consume the remaining HOT_RAM headroom and was deferred per design §19.24 until motion replay is closer to 0.02°. Schematic IST8310 on **PB6/PB7** has stub headers in `Sensors/ist8310/` (not linked). API stub: `vqf_fixed_update_mag_f18` under `#if VQF_FIXED_ENABLE_MAG`.
 
-`make verify-zw` enforces fxp hot symbols in **HOT_RAM** and soft-float **not** in ZW.
+### ZW / HOT_RAM sizes (local `riscv64-unknown-elf` build)
+
+| Metric | Value |
+|--------|-------|
+| ZW (init+vector+text_zw) | **~9676 B** / 32768 (~29.5%) |
+| HOT_RAM (`.text.hot_ram`) | **~1948 B** / 4096 (~47.6%) |
+| Soft-float / libm in ZW | **none** (NZW only for Mahony/Comp) |
+| `make verify-zw` | **OK** |
+
+`make verify-zw` enforces vqf_fixed updates + LSM status/gyr/acc fixed reads in **HOT_RAM** and soft-float **not** in ZW. Host: `make replay`.
 
 ## Multi-algorithm selection
 
@@ -257,15 +267,15 @@ User/
   ch32v20x_conf.h
 Sensors/lsm6dsv/
   lsm6dsv.c/h
-Middleware/vqf-fxp/       # fixed-point VQF-structured 6DOF (default hot path)
-  vqf_fxp.c / vqf_fxp.h / README.md
-Middleware/vqf-c/         # vendored dusking1/vqf-c (MIT) — kept, not linked on this branch
-  vqf.c / vqf.h
+Middleware/vqf_fixed/     # Full VQF fixed 6D (default HOT_RAM path)
+Middleware/vqf-fxp/       # deprecated Q16 wrapper
+Middleware/vqf-c/         # float baseline for host replay (not linked in FW)
 Middleware/fusion/        # unified API + Mahony + complementary
-  fusion.h / fusion_vqf.c / fusion_select.c
-  mahony.c/h / complementary.c/h
+Sensors/ist8310/          # mag stub (unlinked; VQF_FIXED_ENABLE_MAG=0)
+tools/vqf_fixed_replay/   # host float vs fixed RMS harness
 Platform/algo_cfg.h/.c    # Flash flag read/write
-scripts/setalgo.py        # host patch / OpenOCD helpers
+scripts/gen_vqf_fixed_coeffs.py
+scripts/setalgo.py / verify_zw_hotpath.py
 vendor/
   NOTICE
   mtkos-ch32v203-minimal/ # MIT，参考用薄寄存器头文件（非构建必需）
@@ -282,13 +292,13 @@ vendor/
 - Bus: **SPI1** mode 3, soft CS **PA4**, SCK/MISO/MOSI **PA5/PA6/PA7**
 - Read protocol: address byte with **MSB=1** (`reg | 0x80`)
 - WHO_AM_I = **0x70**
-- ODR: HAODR true **1000 Hz** (`HAODR_CFG=0x01`, CTRL1/CTRL2=`0x19`)
+- ODR: HAODR mode 1 — **GY 4 kHz** (`CTRL2=0x1B`), **XL 1 kHz** (`CTRL1=0x19`), `HAODR_CFG=0x01`
 - FS: ±4 g / ±2000 dps
-- 宏：`LSM6DSV_ODR_HZ = 1000.0f`
-- Hot path: `lsm6dsv_read_acc_gyr` + `platform_spi_xfer` / `platform_lsm_cs` in **FLASH_ZW**
+- 宏：`LSM6DSV_GYR_ODR_HZ=4000`, `LSM6DSV_ACC_ODR_HZ=1000`, `LSM6DSV_ODR_HZ=1000.0f` (Mahony/UART cadence)
+- Hot path: `lsm6dsv_read_status` / `read_gyr_fixed` / `read_acc_fixed` + SPI CS in **FLASH_ZW**
 
 ### Attitude filters (selectable)
-- **VQF** (default): vendored **[DusKing1/vqf-c](https://github.com/DusKing1/vqf-c)** — `initVqf(1/1000,1/1000,5.0)` 6DOF, no `updateMag`; runs in **ZW**
+- **VQF** (default): **`vqf_fixed`** Full 6D @ GY 4 kHz / XL 1 kHz in **HOT_RAM**; float `vqf-c` kept for host replay only (not linked in FW)
 - **Mahony 6DOF**: compact AHRS, default Kp=1.0 / Ki=0.0; runs in **ALGO_RAM**
 - **Complementary 6DOF**: gyro integrate + accel tilt (α≈0.02 @ 1 kHz); runs in **ALGO_RAM**
 - Units: gyro **rad/s**, accel **m/s²**; quat **wxyz**; Euler ZYX deg in ZW
@@ -318,10 +328,10 @@ vendor/
 
 Pins (CH32 Remap1): **PA11=RX, PA12=TX** (schematic AT32 CAN is PA2/PA3 — not available on CH32). Bitrate `#define PLATFORM_CAN_BITRATE 1000000` (APB1 72 MHz → BTR BRP=6, TS1=8, TS2=3, sample ≈75%). TX: non-blocking mailbox0; if busy after ≤2 polls, drop + `platform_can_drop_count++`. **Transceiver required.** USBD left off (SRAM share).
 
-### main / 1 kHz 循环
+### main / 4k–1k 循环
 1. NZW：platform init → read algo flag → `fusion_boot_select` → boot log → optional `SETALGO` window  
-2. IMU init；`fusion_active->init(1000)`  
-3. ZW：`fusion_run_1khz` 每 **1 ms**：IMU → fusion update/get_quat → Euler → UART + CAN  
+2. IMU init (HAODR 4k/1k)；`fusion_active->init` → vqf_fixed `{4000,1000}`  
+3. HOT_RAM：`fusion_run_1khz` → STATUS poll → gyr@4kHz / acc+UART+CAN@1kHz  
 
 ---
 
@@ -370,21 +380,30 @@ LSM6DSV 寄存器与 WHO_AM_I 参考 ST 公开资料（lsm6dsv-pid / 数据手�
 
 本仓库应用代码：MIT（见 `LICENSE`）。`Middleware/vqf-c/` 遵循其上游 MIT（Hugo Chiang）；芯片厂商 SPL 与 ST 驱动头文件各自遵循原许可证。
 
-## 实测体积（本机交叉编译，multi-algo）
+## 实测体积（本机交叉编译，multi-algo + vqf_fixed 4k/1k）
 
-工具链：`riscv64-unknown-elf-gcc` 14.2 + picolibc，`-Os`，`rv32imac_zicsr` / `ilp32`。
+工具链：`riscv64-unknown-elf-gcc` + picolibc，`-Os`，`rv32imac_zicsr` / `ilp32`。
 
 | 项 | 数值 |
 |---|---|
 | Links cleanly? | **Yes** |
-| ODR / outputs | **1000 Hz** HAODR; UART binary + CAN Euler every sample |
+| ODR / outputs | GY **4 kHz** / XL **1 kHz** HAODR; UART+CAN Euler @ **1 kHz** |
 | Algo flag | **`0x00037000`** (FPEC `0x08037000`), magic `ALGO` |
 | HOT_RAM reserved | **4096 B** @ `0x20000000` |
-| `.text.hot_ram` used | **3136 B** (VQF-fxp business; `__divdi3` family stays ZW) |
+| `.text.hot_ram` used | **~1948 B** (~47.6%; `__divdi3` family stays ZW) |
 | ALGO_RAM reserved | **4096 B** @ `0x20001000` |
 | `.algo_ram` used | **3144 B** (Mahony + Comp) |
-| RAM region | **2048 B** @ `0x20002000` — `.data` 24 + `.bss` 120 + stack 1024; **free ≈880 B** |
-| FLASH ZW (init+vector+text_zw) | **3440 B** / 32768 B |
-| `make verify-zw` | **OK** — VQF hot path HOT_RAM `0x2000xxxx`; Mahony/Comp in ALGO_RAM |
+| RAM region | **2048 B** @ `0x20002000` — `.data` 24 + `.bss` + stack 768 |
+| FLASH ZW (init+vector+text_zw) | **~9676 B** / 32768 B (~29.5%) |
+| Mag / 9D | **Off** (stub API + IST8310 headers only) |
+| Host replay | static RMS **0.000°**; motion RMS **≈0.48°** (target 0.02° not met) |
+| `make verify-zw` | **OK** — vqf_fixed + LSM fixed reads in HOT_RAM |
 
-结论：默认 VQF-fxp 1 kHz 热路径在 **HOT_RAM（SRAM）** 执行；`__divdi3` 族保留 ZW；交替算法在 ALGO_RAM；1 kHz UART+CAN 路径保持。
+结论：默认 **vqf_fixed** 4k/1k 热路径在 **HOT_RAM**；UART/CAN 仅 1 kHz；mag 关闭；浮点回放未达 0.02° 动态目标（诚实记录）。
+
+### Board-only gaps (cannot close in CI)
+
+- Real SPI LSM6DSV HAODR 4k/1k + cycle occupancy on 144 MHz silicon
+- INT1/INT2 or FIFO watermark IRQ instead of STATUS poll
+- IST8310 I2C bring-up on PB6/PB7 when enabling 9D
+- On-air UART/CAN packet validation with transceiver
