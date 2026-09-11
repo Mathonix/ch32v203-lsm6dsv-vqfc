@@ -19,3 +19,7 @@
 
 See `vqf_fxp.h`. Wired as `ALGO_VQF` via `Middleware/fusion/fusion_vqf.c`;
 `User/main.c` calls `vqfx_*` directly on the default path (no float).
+
+## Placement
+
+Hot symbols use `FLASH_ZW` → `.text.hot_ram` (**HOT_RAM** @ `0x20000000`, LMA in ZW Flash).

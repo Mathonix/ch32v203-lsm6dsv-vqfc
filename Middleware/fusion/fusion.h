@@ -1,9 +1,9 @@
 /**
  * Unified 6DOF attitude-fusion API.
  *
- * VQF runs from zero-wait Flash (default). Mahony / complementary live in
- * FLASH_NZW with VMA in ALGO_RAM; startup copies them into SRAM and the
- * selected vtable's function pointers target RAM addresses.
+ * VQF-fxp hot path runs from HOT_RAM (default, boot-copied). Mahony /
+ * complementary live in FLASH_NZW with VMA in ALGO_RAM; startup copies
+ * them into SRAM and the selected vtable's function pointers target RAM.
  *
  * Units: gyroscope rad/s, accelerometer m/s², quaternion wxyz.
  */

@@ -3,10 +3,10 @@
 #
 #   make            # build build/firmware.elf
 #   make flash      # optional: openocd + wch-link (adjust OPENOCD)
-#   make verify-zw  # VQF-fxp hot-path symbols still in R0WAIT
+#   make verify-zw  # VQF-fxp hot-path symbols in HOT_RAM (SRAM)
 #
 # Flash: G6U6 R0WAIT=32KB zero-wait + ~188KB NZW code + 4KB algo_cfg @ 0x37000
-# ALGO_RAM 3KB @ 0x20000000 for Mahony/Comp SRAM execute; RAM 7KB remainder.
+# HOT_RAM 4KB @ 0x20000000; ALGO_RAM 4KB @ 0x20001000; RAM 2KB @ 0x20002000.
 
 TARGET   ?= firmware
 BUILD    ?= build

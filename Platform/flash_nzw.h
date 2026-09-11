@@ -5,9 +5,8 @@
  * Prefer for: platform_init, sensor init, VQF init, printf format paths,
  * unused 9D/mag helpers, etc.
  *
- * Hot path (fusion_sample_step, updateGyr/updateAcc + full callee graph, SPI read,
- * SysTick helpers) must use FLASH_ZW / default sections claimed by .text_zw
- * so addresses stay < 0x8000 (R0WAIT).
+ * Hot path (fusion_run_1khz_fxp, vqfx_*, SPI Q16 read, UART/CAN i16) must use
+ * FLASH_ZW → .text.hot_ram (HOT_RAM SRAM execute after boot copy).
  */
 #ifndef FLASH_NZW_H
 #define FLASH_NZW_H

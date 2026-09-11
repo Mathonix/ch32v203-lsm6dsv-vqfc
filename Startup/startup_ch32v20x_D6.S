@@ -120,6 +120,18 @@ handle_reset:
   addi a1, a1, 4
   bltu a1, a2, 1b
 2:
+  /* copy .text.hot_ram (VQF-fxp 1 kHz hot path LMA → HOT_RAM VMA) */
+  la a0, _shot_ram_lma
+  la a1, _shot_ram
+  la a2, _ehot_ram
+  beq a1, a2, 2f
+1:
+  lw t0, 0(a0)
+  sw t0, 0(a1)
+  addi a0, a0, 4
+  addi a1, a1, 4
+  bltu a1, a2, 1b
+2:
   /* copy .algo_ram (Mahony/Comp LMA → ALGO_RAM VMA) */
   la a0, _salgo_ram_lma
   la a1, _salgo_ram

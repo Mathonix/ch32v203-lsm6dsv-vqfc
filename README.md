@@ -1,10 +1,10 @@
 # CH32V203G6U6 + LSM6DSV + multi-algo fusion
 
-面向 **CH32V203G6U6** 的裸机姿态固件：通过 **SPI** 读取 **LSM6DSV** 六轴 IMU，经可切换的 **6DOF** 融合算法输出四元数与欧拉角。默认 **VQF-fxp**（固定小数、VQF 结构；见 `Middleware/vqf-fxp/`）在 **zero-wait Flash** 执行；浮点 [dusking1/vqf-c](https://github.com/DusKing1/vqf-c) 源码保留但本分支不链入；可选 **Mahony** / **complementary** 从 NZW 拷入 **ALGO_RAM** 后在 SRAM 执行。算法选择持久化在 Flash 标志位。
+面向 **CH32V203G6U6** 的裸机姿态固件：通过 **SPI** 读取 **LSM6DSV** 六轴 IMU，经可切换的 **6DOF** 融合算法输出四元数与欧拉角。默认 **VQF-fxp**（固定小数、VQF 结构；见 `Middleware/vqf-fxp/`）在 **HOT_RAM（SRAM）** 执行（启动时从 ZW Flash LMA 拷贝）；浮点 [dusking1/vqf-c](https://github.com/DusKing1/vqf-c) 源码保留但本分支不链入；可选 **Mahony** / **complementary** 从 NZW 拷入 **ALGO_RAM** 后在 SRAM 执行。算法选择持久化在 Flash 标志位。
 
 > **Schematic note:** 原理图主控为 **AT32F423KCU7-4**；本仓库固件目标为 **CH32V203**，在 AF 允许处对齐同名网络（尤其 **LSM SPI PA4–PA7**）。UART/CAN 在 CH32 上的复用与 AT32 不同，见下表。
 
-Short English: Bare-metal CH32V203G6U6 + LSM6DSV (**SPI** mode 3) with selectable 6DOF fusion (**VQF-fxp** fixed-point default in ZW Flash on `feat/vqf-fixedpoint-rv`; **Mahony** / **complementary** execute from **SRAM**). **1 kHz** Euler as **int16 millideg** on **USART2 binary @ 921600** (magic `A5 5B`) + **CAN1 @ 1 Mbit** (`0x321`). Algo flag in NZW @ `0x37000`.
+Short English: Bare-metal CH32V203G6U6 + LSM6DSV (**SPI** mode 3) with selectable 6DOF fusion (**VQF-fxp** fixed-point default in **HOT_RAM SRAM** on `feat/vqf-fixedpoint-rv`; **Mahony** / **complementary** in **ALGO_RAM**). **1 kHz** Euler as **int16 millideg** on **USART2 binary @ 921600** (magic `A5 5B`) + **CAN1 @ 1 Mbit** (`0x321`). Algo flag in NZW @ `0x37000`.
 
 仓库：https://github.com/Mathonix/ch32v203-lsm6dsv-vqfc
 
@@ -16,7 +16,7 @@ Short English: Bare-metal CH32V203G6U6 + LSM6DSV (**SPI** mode 3) with selectabl
 |------|------|
 | MCU (FW) | **CH32V203G6U6**（QFN28）；原理图 MCU 为 **AT32F423KCU7-4** |
 | Flash 布局 | **R0WAIT = 32 KB** ZW @ `0x00000000`；**NZW code 188 KB** @ `0x00008000`；**algo_cfg 4 KB** @ `0x00037000`（总 CodeFlash ≈ 224 KB） |
-| RAM | **10 KB** total：`ALGO_RAM` **4 KB** @ `0x20000000` + **6 KB** data/bss/stack @ `0x20001000` |
+| RAM | **10 KB** total：`HOT_RAM` **4 KB** @ `0x20000000` + `ALGO_RAM` **4 KB** @ `0x20001000` + **2 KB** data/bss/stack @ `0x20002000` |
 | 内核系列 | CH32V20x **D6**（与 F6/C6/G6 同启动文件） |
 | IMU | **LSM6DSV**，**SPI**，**WHO_AM_I = 0x70**（ST DS13476 / lsm6dsv-pid） |
 | SPI | **Mode 3** (CPOL=1 CPHA=1)；读寄存器地址 **OR 0x80**；软 CS |
@@ -53,38 +53,39 @@ WCH datasheet note: **advertised Flash bytes = zero-wait R0WAIT only**. For V203
 
 | Region | Origin | Length | Role |
 |--------|--------|--------|------|
-| `FLASH` | `0x00000000` | 32K | Zero-wait R0WAIT |
+| `FLASH` | `0x00000000` | 32K | Zero-wait R0WAIT (boot + `__divdi3` + HOT_RAM LMA) |
 | `FLASH_NZW` | `0x00008000` | 188K | Non-zero-wait CodeFlash (code + `.algo_ram` LMA) |
 | `ALGO_CFG` | `0x00037000` | 4K | Persistent algo select flag (NOLOAD; programmed at runtime) |
-| `ALGO_RAM` | `0x20000000` | 4K | SRAM execute window for Mahony + complementary |
-| `RAM` | `0x20001000` | 6K | `.data` / `.bss` / stack (1024 B) |
+| `HOT_RAM` | `0x20000000` | 4K | SRAM execute window for VQF-fxp 1 kHz hot path |
+| `ALGO_RAM` | `0x20001000` | 4K | SRAM execute window for Mahony + complementary |
+| `RAM` | `0x20002000` | 2K | `.data` / `.bss` / stack (1024 B) |
 
 ### Section placement
 
 | Output section | Region | Contents |
 |----------------|--------|----------|
 | `.init` / `.vector` | `FLASH` | Reset trampoline + vector table |
-| `.text_zw` | `FLASH` | `SystemInit`, **`.text.hot`** (`fusion_run_1khz` / VQF-fxp / Euler mdeg), IMU/SPI Q16 read, UART `A5 5B` + CAN TX, integer `libgcc` (`mul`/`mulh`/`div` + `__divdi3`) — **no soft-float/libm** |
-| `.text_nzw` | `FLASH_NZW` | Cold/init + cold VQF (`initVqf`/mag/setters) |
+| `.text_zw` | `FLASH` | `handle_reset`, `SystemInit`, `SysTick_Handler`, `memcpy`/`memset`, **`__divdi3` / `__udivdi3` / `__umoddi3`** (Option B) — **no soft-float/libm** |
+| `.text.hot_ram` | `HOT_RAM` AT>`FLASH` | VQF-fxp 1 kHz business: `fusion_run_1khz_fxp`, `vqfx_*`, quat helpers, SPI Q16, UART `A5 5B` + CAN i16, `platform_millis` |
+| `.text_nzw` | `FLASH_NZW` | Cold/init + cold VQF (`vqfx_init`/float helpers) |
 | `.text` / `.fini` | `FLASH_NZW` | `main`, printf, `algo_cfg_*`, remaining libc |
 | `.algo_ram` | `ALGO_RAM` AT>`FLASH_NZW` | Mahony + complementary code (startup memcpy LMA→VMA) |
 | `.algo_cfg` | `ALGO_CFG` NOLOAD | Flag slot @ `0x37000` |
 
-Convention: **`FLASH_ZW`** → `.text.hot`; **`FLASH_NZW`** → `.text_nzw`; algo code → `.algo_text.*` (VMA=ALGO_RAM).
+Convention: **`FLASH_ZW`** → `.text.hot_ram` (SRAM VMA); **`FLASH_NZW`** → `.text_nzw`; algo code → `.algo_text.*` (VMA=ALGO_RAM). Startup copies HOT_RAM then ALGO_RAM LMA→VMA before `main`.
 
-### 1 kHz hot-path ZW guarantee
+### 1 kHz hot-path SRAM guarantee
 
-Goal: **1 kHz VQF output** with **every** high-frequency callee in R0WAIT (`addr < 0x8000`).
+Goal: **1 kHz VQF-fxp output** with business callees in **HOT_RAM** (`0x2000xxxx`). Int64 div helpers may stay in ZW Flash (Option B).
 
 1. LSM6DSV XL+GY ODR = **true 1000 Hz** via HAODR (`HAODR_CFG.HAODR_SEL=1`, CTRL1/CTRL2=`0x19`). Without HAODR the same ODR code is 960 Hz.
-2. `initVqf(1.0f/1000, 1.0f/1000, 5.0f)`.
-3. Tight loop (ALGO_VQF): `FLASH_ZW fusion_run_1khz()` → `lsm6dsv_read_acc_gyr_fxp` → `vqfx_update_gyr/acc` → `vqfx_get_euler_mdeg` → UART `A5 5B` + CAN. Mahony/Comp use NZW float loop + ALGO_RAM.
-4. Verify: `make verify-zw` checks VQF-fxp hot symbols `< 0x8000`, soft-float **not** in ZW, Mahony/Comp in ALGO_RAM. Example:
+2. Tight loop (ALGO_VQF): HOT_RAM `fusion_run_1khz_fxp()` → `lsm6dsv_read_acc_gyr_fxp` → `vqfx_update_gyr/acc` → `vqfx_get_euler_mdeg` → UART `A5 5B` + CAN. Mahony/Comp use NZW float loop + ALGO_RAM.
+3. Verify: `make verify-zw` checks VQF-fxp hot symbols in HOT_RAM, soft-float **not** in ZW, Mahony/Comp in ALGO_RAM. Example:
 
 ```bash
 make PREFIX=riscv64-unknown-elf-
 make verify-zw
-riscv64-unknown-elf-nm -n build/firmware.elf | egrep 'vqfx_|fusion_run|mahony_|__addsf3'
+riscv64-unknown-elf-nm -n build/firmware.elf | egrep 'vqfx_|fusion_run|mahony_|__divdi3'
 ```
 
 GNU ld **region-list overflow** (`>FLASH FLASH_NZW`) is **not** supported by this toolchain’s `ld` 2.44 (syntax error), so placement is **explicit**.
@@ -136,7 +137,7 @@ Legacy float UART magic `A5 5A` (17 bytes) remains for Mahony/Comp NZW path only
 | ZW (init+vector+text_zw) | **~24364 B** (~74% of 32K) | **~6548 B** (~20% of 32K) |
 | Soft-float / libm in ZW | yes (`__addsf3`, `atan2f`, …) | **none** (soft-float stays NZW for Mahony/Comp) |
 
-`make verify-zw` enforces fxp hot symbols in ZW and soft-float **not** in ZW.
+`make verify-zw` enforces fxp hot symbols in **HOT_RAM** and soft-float **not** in ZW.
 
 ## Multi-algorithm selection
 
@@ -144,7 +145,7 @@ Legacy float UART magic `A5 5A` (17 bytes) remains for Mahony/Comp NZW path only
 
 | ID | Name | Execute from |
 |----|------|--------------|
-| `0` / `ALGO_VQF` | VQF-fxp (default) | Zero-wait Flash (fixed-point; not copied to SRAM) |
+| `0` / `ALGO_VQF` | VQF-fxp (default) | HOT_RAM (SRAM execute after boot copy) |
 | `1` / `ALGO_MAHONY` | Mahony AHRS 6DOF | ALGO_RAM (SRAM) after boot copy |
 | `2` / `ALGO_COMPLEMENTARY` | Complementary filter 6DOF | ALGO_RAM (SRAM) after boot copy |
 | invalid / erased | treated as VQF | ZW |
@@ -175,7 +176,7 @@ Legacy float UART magic `A5 5A` (17 bytes) remains for Mahony/Comp NZW path only
 
 ### SRAM execute note
 
-Mahony + complementary are compiled into `.algo_text.*` with **VMA = ALGO_RAM**, **LMA = FLASH_NZW**. Startup copies `_salgo_ram_lma` → `[_salgo_ram, _ealgo_ram)` (both algos, ~3.2 KB). Function pointers in `fusion_algo_t` hold **RAM addresses**. VQF is **never** copied to SRAM.
+Mahony + complementary are compiled into `.algo_text.*` with **VMA = ALGO_RAM** @ `0x20001000`, **LMA = FLASH_NZW**. Startup copies `_salgo_ram_lma` → `[_salgo_ram, _ealgo_ram)` (both algos, ~3.2 KB). Function pointers in `fusion_algo_t` hold **RAM addresses**. VQF-fxp hot path is copied into **HOT_RAM** @ `0x20000000` (`_shot_ram_lma` → `[_shot_ram, _ehot_ram)`).
 
 ### Unified fusion API (`Middleware/fusion/`)
 
@@ -230,7 +231,7 @@ Platform/
   platform_ch32v203.c     # SystemInit enables FLASH enhance read
   ch32v203_regs.h
   flash_nzw.h             # FLASH_NZW / FLASH_NZW_RODATA
-  flash_zw.h              # FLASH_ZW → .text.hot (1 kHz loop)
+  flash_zw.h              # FLASH_ZW → .text.hot_ram (HOT_RAM SRAM)
 User/
   main.c
   system_ch32v20x.c/h
@@ -326,7 +327,7 @@ Prefer **ELF/HEX** for programming: the `.bin` spans `0x0000`–end of image and
 ### B. MounRiver Studio
 
 1. 新建 **CH32V203** 工程，芯片选 **CH32V203G6U6**（或同 D6）。  
-2. 将本仓库 `User/`、`Sensors/`、`Middleware/`、`Platform/` 加入工程；用本仓库 `Startup/link.ld`（**32K ZW + 188K NZW + 4K algo_cfg / ALGO_RAM 4K + RAM 6K**）。  
+2. 将本仓库 `User/`、`Sensors/`、`Middleware/`、`Platform/` 加入工程；用本仓库 `Startup/link.ld`（**32K ZW + 188K NZW + 4K algo_cfg / HOT_RAM 4K + ALGO_RAM 4K + RAM 2K**）。  
 3. **可选**：从 MRS pack 加入 WCH SPL；若继续用 `Platform/` 可不链 SPL 的 SPI/USART。  
 4. 包含路径加上 `Platform`、`Sensors/lsm6dsv`、`Middleware/vqf-c`、`Middleware/fusion`。  
 5. 编译下载；串口 **921600** 收二进制包，或仅看启动横幅文本。
@@ -360,12 +361,12 @@ LSM6DSV 寄存器与 WHO_AM_I 参考 ST 公开资料（lsm6dsv-pid / 数据手�
 | Links cleanly? | **Yes** |
 | ODR / outputs | **1000 Hz** HAODR; UART binary + CAN Euler every sample |
 | Algo flag | **`0x00037000`** (FPEC `0x08037000`), magic `ALGO` |
-| ALGO_RAM reserved | **4096 B** @ `0x20000000` |
-| `.algo_ram` used | **3184 B** (Mahony ≈1434 B + Comp ≈1750 B) |
-| FLASH ZW (`.init`+`.vector`+`.text_zw`) | **~24868 B** / 32768 B (~75.9%) |
-| FLASH_NZW (`.text_nzw`+`.text`+`.fini`) | **~16892 B** / 192512 B |
-| Berkeley `text` / `data` / `bss` | **~44944 / 24 / 1648** |
-| Stack | **1024 B** (≥768) in 6 KB RAM region |
-| `make verify-zw` | **OK** — VQF hot path ZW; Mahony/Comp in ALGO_RAM |
+| HOT_RAM reserved | **4096 B** @ `0x20000000` |
+| `.text.hot_ram` used | **3136 B** (VQF-fxp business; `__divdi3` family stays ZW) |
+| ALGO_RAM reserved | **4096 B** @ `0x20001000` |
+| `.algo_ram` used | **3144 B** (Mahony + Comp) |
+| RAM region | **2048 B** @ `0x20002000` — `.data` 24 + `.bss` 120 + stack 1024; **free ≈880 B** |
+| FLASH ZW (init+vector+text_zw) | **3440 B** / 32768 B |
+| `make verify-zw` | **OK** — VQF hot path HOT_RAM `0x2000xxxx`; Mahony/Comp in ALGO_RAM |
 
-结论：默认 VQF 仍在 32K R0WAIT；交替算法在 SRAM 执行；1 kHz UART+CAN 路径保持。
+结论：默认 VQF-fxp 1 kHz 热路径在 **HOT_RAM（SRAM）** 执行；`__divdi3` 族保留 ZW；交替算法在 ALGO_RAM；1 kHz UART+CAN 路径保持。

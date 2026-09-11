@@ -9,7 +9,7 @@
  *   (Schematic UART nets are PA0/PA1 on AT32; CH32 has no USART data AF there)
  * - CAN1 Remap1: PA11=RX, PA12=TX @ 1 Mbit, std ID 0x321
  *   (Schematic CAN nets are PA2/PA3 on AT32; CH32 cannot remap CAN there)
- * - Default algo: fixed-point VQF-structured (vqf-fxp) in zero-wait Flash
+ * - Default algo: fixed-point VQF-structured (vqf-fxp) in HOT_RAM (SRAM)
  * - Alternates (Mahony / complementary): NZW LMA → ALGO_RAM, execute from SRAM
  *
  * Units: gyroscope rad/s, accelerometer m/s².
@@ -70,8 +70,8 @@ FLASH_NZW static void fusion_uart_print_status(const float q[4])
 #endif
 
 /**
- * 1 kHz hot body in zero-wait Flash: IMU → fusion->update → get_quat.
- * VQF callees stay ZW; Mahony/Comp run from ALGO_RAM via function pointers.
+ * 1 kHz hot body in HOT_RAM (SRAM): IMU → vqfx → Euler i16 UART/CAN.
+ * VQF callees in HOT_RAM; Mahony/Comp run from ALGO_RAM via function pointers.
  */
 /**
  * Float sample step — used by Mahony / complementary (ALGO_RAM).
@@ -298,7 +298,7 @@ FLASH_NZW int main(void)
     fusion_active->init(LSM6DSV_ODR_HZ);
     platform_uart_printf("Fusion init @ %.0f Hz\n", (double)LSM6DSV_ODR_HZ);
     if (fusion_active_id == ALGO_VQF) {
-        platform_uart_printf("Hot path: VQF-fxp (Q30/Q16) in ZW; millideg UART A5 5B + CAN @ 1 kHz\n");
+        platform_uart_printf("Hot path: VQF-fxp (Q30/Q16) in HOT_RAM; millideg UART A5 5B + CAN @ 1 kHz\n");
     } else {
         platform_uart_printf("Hot path: algo in ALGO_RAM (SRAM); I/O+euler in ZW @ 1 kHz\n");
     }

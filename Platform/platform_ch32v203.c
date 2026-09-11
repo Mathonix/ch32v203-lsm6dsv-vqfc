@@ -81,7 +81,7 @@ void SystemInit(void)
     SystemCoreClock = 144000000u;
 }
 
-static uint64_t systick_count64(void)
+FLASH_ZW static uint64_t systick_count64(void)
 {
     uint32_t hi1, lo, hi2;
     do {
@@ -103,7 +103,7 @@ static void systick_init(void)
     STK_CTLR = STK_STE | STK_STCLK | STK_STRE;
 }
 
-uint32_t platform_millis(void)
+FLASH_ZW uint32_t platform_millis(void)
 {
     return (uint32_t)(systick_count64() / (SystemCoreClock / 1000u));
 }

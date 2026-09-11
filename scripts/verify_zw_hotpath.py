@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Verify VQF-fxp 1 kHz hot path symbols live in zero-wait Flash (< 0x8000).
+"""Verify VQF-fxp 1 kHz hot path symbols live in HOT_RAM (SRAM @ 0x2000xxxx).
 
-Also reports ALGO_RAM placement for Mahony/Comp (must be in SRAM @ 0x20000000+).
-On feat/vqf-fixedpoint-rv the default hot path is integer (no soft-float / libm in ZW).
+Also reports ALGO_RAM placement for Mahony/Comp and that soft-float/libm are
+not in zero-wait Flash. Int64 div helpers may remain in ZW (Option B).
 """
 from __future__ import annotations
 
@@ -12,8 +12,12 @@ import sys
 from pathlib import Path
 
 ZW_LIMIT = 0x8000
-ALGO_RAM_BASE = 0x20000000
-ALGO_RAM_END = 0x20001000
+HOT_RAM_BASE = 0x20000000
+HOT_RAM_END = 0x20001000
+ALGO_RAM_BASE = 0x20001000
+ALGO_RAM_END = 0x20002000
+RAM_BASE = 0x20002000
+RAM_END = 0x20002800
 
 REQUIRED = [
     "vqfx_update_gyr",
@@ -27,6 +31,7 @@ REQUIRED = [
     "platform_uart_write_bytes",
     "platform_uart_send_euler_i16",
     "platform_can_send_euler_i16",
+    "platform_millis",
 ]
 
 # Soft-float / libm must NOT appear in ZW on this branch (default path is fxp)
@@ -123,6 +128,18 @@ def jal_targets(elf: Path, func: str) -> list[tuple[int, str]]:
     return hits
 
 
+def zone_of(addr: int) -> str:
+    if HOT_RAM_BASE <= addr < HOT_RAM_END:
+        return "HOT_RAM"
+    if ALGO_RAM_BASE <= addr < ALGO_RAM_END:
+        return "ALGO_RAM"
+    if RAM_BASE <= addr < RAM_END:
+        return "RAM"
+    if addr < ZW_LIMIT:
+        return "ZW"
+    return "NZW"
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         print(f"usage: {sys.argv[0]} firmware.elf", file=sys.stderr)
@@ -131,7 +148,7 @@ def main() -> int:
     syms = parse_nm(elf)
     errors: list[str] = []
 
-    print("=== Hot symbol addresses (must be < 0x8000) ===")
+    print("=== Hot symbol addresses (must be in HOT_RAM [0x20000000, 0x20001000)) ===")
     print(f"{'symbol':<32} {'addr':>10}  zone")
     for name in REQUIRED:
         if name not in syms:
@@ -139,19 +156,20 @@ def main() -> int:
             print(f"{name:<32} {'MISSING':>10}")
             continue
         addr = syms[name]
-        zone = "ZW" if addr < ZW_LIMIT else "NZW"
+        zone = zone_of(addr)
         print(f"{name:<32} 0x{addr:08x}  {zone}")
-        if addr >= ZW_LIMIT:
-            errors.append(f"{name} @ 0x{addr:x} >= 0x8000")
+        if not (HOT_RAM_BASE <= addr < HOT_RAM_END):
+            errors.append(f"{name} @ 0x{addr:x} not in HOT_RAM")
 
-    print("\n=== Integer helpers (divdi3) should be ZW if linked ===")
-    for name in ("__divdi3", "__udivdi3"):
+    print("\n=== Integer helpers (divdi3) — ZW OK (Option B) ===")
+    for name in ("__divdi3", "__udivdi3", "__umoddi3"):
         if name in syms:
             addr = syms[name]
-            zone = "ZW" if addr < ZW_LIMIT else "NZW"
+            zone = zone_of(addr)
             print(f"{name:<32} 0x{addr:08x}  {zone}")
-            if addr >= ZW_LIMIT:
-                errors.append(f"{name} @ 0x{addr:x} not in ZW")
+            # Prefer ZW or HOT_RAM; NZW would be a regression for hot path
+            if addr >= ZW_LIMIT and not (HOT_RAM_BASE <= addr < HOT_RAM_END):
+                errors.append(f"{name} @ 0x{addr:x} not in ZW/HOT_RAM")
 
     print("\n=== Soft-float / libm must not be in ZW ===")
     for name in FORBIDDEN_IN_ZW:
@@ -159,12 +177,12 @@ def main() -> int:
             print(f"{name:<32} (not linked)")
             continue
         addr = syms[name]
-        zone = "ZW" if addr < ZW_LIMIT else "NZW"
+        zone = zone_of(addr)
         print(f"{name:<32} 0x{addr:08x}  {zone}")
         if addr < ZW_LIMIT:
             errors.append(f"{name} still in ZW @ 0x{addr:x}")
 
-    print("\n=== ALGO_RAM symbols (must be in [0x20000000, 0x20001000)) ===")
+    print("\n=== ALGO_RAM symbols (must be in [0x20001000, 0x20002000)) ===")
     for name in ALGO_RAM_SYMS:
         if name not in syms:
             errors.append(f"MISSING algo symbol: {name}")
@@ -176,14 +194,17 @@ def main() -> int:
         if not ok:
             errors.append(f"{name} @ 0x{addr:x} not in ALGO_RAM")
 
-    print("\n=== jal targets from hot funcs (must be < 0x8000) ===")
+    print("\n=== jal targets from hot funcs (HOT_RAM or ZW helpers OK) ===")
     print("(indirect calls via fusion_active are OK — not checked as jal)")
     for func in HOT_FUNCS:
         if func not in syms:
             continue
         bad = []
         for addr, name in jal_targets(elf, func):
-            if addr >= ZW_LIMIT:
+            in_hot = HOT_RAM_BASE <= addr < HOT_RAM_END
+            in_zw = addr < ZW_LIMIT
+            # NZW / unexpected SRAM data region is bad for 1 kHz
+            if not (in_hot or in_zw):
                 bad.append((addr, name))
         status = "OK" if not bad else "FAIL"
         print(f"{func}: {status}")
@@ -193,18 +214,27 @@ def main() -> int:
 
     sizes = section_sizes(elf)
     zw = sizes.get(".init", 0) + sizes.get(".vector", 0) + sizes.get(".text_zw", 0)
+    hot = sizes.get(".text.hot_ram", 0)
     nzw = sizes.get(".text_nzw", 0) + sizes.get(".text", 0) + sizes.get(".fini", 0)
     algo = sizes.get(".algo_ram", 0)
+    data = sizes.get(".data", 0)
+    bss = sizes.get(".bss", 0)
+    stack = sizes.get(".stack", 0)
     print(f"\n=== Flash / RAM usage ===")
     print(f"ZW  (init+vector+text_zw): {zw} / 32768 bytes ({100.0 * zw / 32768:.1f}%)")
+    print(f"HOT_RAM (.text.hot_ram):   {hot} / 4096 bytes ({100.0 * hot / 4096:.1f}%)")
     print(f"NZW (text_nzw+text+fini):  {nzw} / 192512 bytes ({100.0 * nzw / 192512:.1f}%)")
     print(f"ALGO_RAM (.algo_ram):      {algo} / 4096 bytes ({100.0 * algo / 4096:.1f}%)")
+    print(f"RAM data+bss+stack:        {data}+{bss}+{stack} / 2048 bytes")
     if zw > 32768:
         errors.append(f"ZW overflow: {zw} > 32768")
+    if hot > 4096:
+        errors.append(f"HOT_RAM overflow: {hot} > 4096")
     if algo > 4096:
         errors.append(f"ALGO_RAM overflow: {algo} > 4096")
+    if data + bss + stack > 2048:
+        errors.append(f"RAM overflow: data+bss+stack {data+bss+stack} > 2048")
 
-    # Report mul/div usage hint
     dump = run(["riscv64-unknown-elf-objdump", "-d", str(elf)])
     mul_n = len(re.findall(r"\bmul\b", dump))
     mulh_n = len(re.findall(r"\bmulh\b", dump))
@@ -217,7 +247,7 @@ def main() -> int:
         for e in errors:
             print(" -", e)
         return 1
-    print("\nVERIFY OK: VQF-fxp hot path in ZW (integer); Mahony/Comp in ALGO_RAM.")
+    print("\nVERIFY OK: VQF-fxp hot path in HOT_RAM (SRAM); Mahony/Comp in ALGO_RAM.")
     return 0
 
 
