@@ -138,7 +138,7 @@ FLASH_ZW void vqf_fixed_update_gyr_f25(const int32_t gyr_f25[3])
     }
 }
 
-FLASH_ZW_CODE static void bias_kalman_update(const int32_t acc_earth_unit_f30[3])
+FLASH_ZW_CODE __attribute__((noinline)) static void bias_kalman_update(const int32_t acc_earth_unit_f30[3])
 {
     int i;
     /* P += V on diagonal (also when no measurement) */

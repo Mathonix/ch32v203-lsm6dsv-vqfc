@@ -9,7 +9,7 @@
 extern "C" {
 #endif
 
-static inline __attribute__((always_inline)) int32_t vqf_sat_s32(int64_t x)
+static inline int32_t vqf_sat_s32(int64_t x)
 {
     if (x > INT32_MAX) {
         return INT32_MAX;
@@ -20,7 +20,7 @@ static inline __attribute__((always_inline)) int32_t vqf_sat_s32(int64_t x)
     return (int32_t)x;
 }
 
-static inline __attribute__((always_inline)) int32_t vqf_round_asr(int64_t x, unsigned s)
+static inline int32_t vqf_round_asr(int64_t x, unsigned s)
 {
     if (s == 0u) {
         return vqf_sat_s32(x);
@@ -32,17 +32,17 @@ static inline __attribute__((always_inline)) int32_t vqf_round_asr(int64_t x, un
     return vqf_sat_s32((x + add) >> s);
 }
 
-static inline __attribute__((always_inline)) int32_t vqf_mul_f30(int32_t a, int32_t b)
+static inline int32_t vqf_mul_f30(int32_t a, int32_t b)
 {
     return vqf_round_asr((int64_t)a * (int64_t)b, 30u);
 }
 
-static inline __attribute__((always_inline)) int32_t vqf_mul_shift(int32_t a, int32_t b, unsigned shift)
+static inline int32_t vqf_mul_shift(int32_t a, int32_t b, unsigned shift)
 {
     return vqf_round_asr((int64_t)a * (int64_t)b, shift);
 }
 
-static inline __attribute__((always_inline)) int32_t vqf_clip_s32(int32_t x, int32_t lo, int32_t hi)
+static inline int32_t vqf_clip_s32(int32_t x, int32_t lo, int32_t hi)
 {
     if (x < lo) {
         return lo;
@@ -53,7 +53,7 @@ static inline __attribute__((always_inline)) int32_t vqf_clip_s32(int32_t x, int
     return x;
 }
 
-static inline __attribute__((always_inline)) int32_t vqf_iabs32(int32_t x)
+static inline int32_t vqf_iabs32(int32_t x)
 {
     return (x < 0) ? -x : x;
 }
