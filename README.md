@@ -6,6 +6,9 @@
 
 Short English: Bare-metal CH32V203G6U6 + LSM6DSV (**SPI** mode 3) with selectable 6DOF fusion (**VQF** default in ZW Flash; **Mahony** / **complementary** execute from **SRAM** after boot memcpy). **1 kHz** Euler on **USART2 binary @ 921600** + **CAN1 @ 1 Mbit** (`0x321`). Algo flag in NZW @ `0x37000`. Self-contained `Platform/` + GCC `Makefile`.
 
+通信与多算法切换见 [docs/protocol.md](docs/protocol.md)（对照 CH32V203G6U6 原理图）。
+
+
 仓库：https://github.com/Mathonix/ch32v203-lsm6dsv-vqfc
 
 ---
