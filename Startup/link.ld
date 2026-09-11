@@ -7,7 +7,7 @@
  * (FLASH base 0x00000000 as used by Qingke / this project).
  *
  * Layout:
- *   FLASH (32K ZW): vectors/reset/SystemInit + VQF 1 kHz hot graph + soft-float
+ *   FLASH (32K ZW): vectors/reset/SystemInit + VQF-fxp 1 kHz hot graph (integer)
  *   FLASH_NZW (188K): cold code; Mahony/Comp stored here as LMA of .algo_ram
  *   ALGO_CFG (4K @ 0x37000): persistent algo select flag (NOLOAD)
  *   ALGO_RAM (4K @ 0x20000000): SRAM execute window for alternate algos
@@ -37,48 +37,6 @@ SECTIONS
     *(.rodata_nzw)
     *(.rodata_nzw.*)
 
-    build/Middleware/vqf-c/vqf.o(.text.updateMag .text.updateMag.*
-                                 .text.getQuat9D .text.getQuat9D.*
-                                 .text.getDelta .text.getDelta.*
-                                 .text.getBiasEstimate .text.getBiasEstimate.*
-                                 .text.setBiasEstimate .text.setBiasEstimate.*
-                                 .text.getRestDetected .text.getRestDetected.*
-                                 .text.getMagDistDetected .text.getMagDistDetected.*
-                                 .text.getRelativeRestDeviations .text.getRelativeRestDeviations.*
-                                 .text.getMagRefNorm .text.getMagRefNorm.*
-                                 .text.getMagRefDip .text.getMagRefDip.*
-                                 .text.setMagRef .text.setMagRef.*
-                                 .text.setMagDistRejectionEnabled .text.setMagDistRejectionEnabled.*
-                                 .text.setMotionBiasEstEnabled .text.setMotionBiasEstEnabled.*
-                                 .text.setRestBiasEstEnabled .text.setRestBiasEstEnabled.*
-                                 .text.setTauAcc .text.setTauAcc.*
-                                 .text.setTauMag .text.setTauMag.*
-                                 .text.setRestDetectionThresholds .text.setRestDetectionThresholds.*
-                                 .text.initVqf .text.initVqf.*
-                                 .text.setup .text.setup.*
-                                 .text.resetState .text.resetState.*
-                                 .text.init_params .text.init_params.*)
-    */vqf.o(.text.updateMag .text.updateMag.*
-            .text.getQuat9D .text.getQuat9D.*
-            .text.getDelta .text.getDelta.*
-            .text.getBiasEstimate .text.getBiasEstimate.*
-            .text.setBiasEstimate .text.setBiasEstimate.*
-            .text.getRestDetected .text.getRestDetected.*
-            .text.getMagDistDetected .text.getMagDistDetected.*
-            .text.getRelativeRestDeviations .text.getRelativeRestDeviations.*
-            .text.getMagRefNorm .text.getMagRefNorm.*
-            .text.getMagRefDip .text.getMagRefDip.*
-            .text.setMagRef .text.setMagRef.*
-            .text.setMagDistRejectionEnabled .text.setMagDistRejectionEnabled.*
-            .text.setMotionBiasEstEnabled .text.setMotionBiasEstEnabled.*
-            .text.setRestBiasEstEnabled .text.setRestBiasEstEnabled.*
-            .text.setTauAcc .text.setTauAcc.*
-            .text.setTauMag .text.setTauMag.*
-            .text.setRestDetectionThresholds .text.setRestDetectionThresholds.*
-            .text.initVqf .text.initVqf.*
-            .text.setup .text.setup.*
-            .text.resetState .text.resetState.*
-            .text.init_params .text.init_params.*)
 
     . = ALIGN(4);
   } >FLASH_NZW AT>FLASH_NZW
@@ -108,12 +66,17 @@ SECTIONS
     *(.text.hot)
     *(.text.hot.*)
 
-    build/Middleware/vqf-c/vqf.o(.text .text.*)
-    */vqf.o(.text .text.*)
-    */*/vqf.o(.text .text.*)
-    */*/*/vqf.o(.text .text.*)
+    build/Middleware/vqf-fxp/vqf_fxp.o(.text .text.*)
+    */vqf_fxp.o(.text .text.*)
+    */*/vqf_fxp.o(.text .text.*)
+    */*/*/vqf_fxp.o(.text .text.*)
 
     *(.text.lsm6dsv_read*)
+    *(.text.vqfx_*)
+    *(.text.platform_uart_send_euler_i16*)
+    *(.text.platform_can_send_euler_i16*)
+    *(.text.mdeg_to_i16*)
+    *(.text.fusion_run_1khz_fxp*)
     *(.text.platform_spi*)
     *(.text.platform_lsm_cs*)
     *(.text.spi_*)
@@ -125,82 +88,22 @@ SECTIONS
     *(.text.millideg_i16*)
     *(.text.systick*)
 
-    *libgcc.a:*addsf3*(.text*)
-    *libgcc.a:*subsf3*(.text*)
-    *libgcc.a:*mulsf3*(.text*)
-    *libgcc.a:*divsf3*(.text*)
-    *libgcc.a:*eqsf2*(.text*)
-    *libgcc.a:*gesf2*(.text*)
-    *libgcc.a:*lesf2*(.text*)
-    *libgcc.a:*unordsf2*(.text*)
-    *libgcc.a:*adddf3*(.text*)
-    *libgcc.a:*subdf3*(.text*)
-    *libgcc.a:*muldf3*(.text*)
-    *libgcc.a:*divdf3*(.text*)
-    *libgcc.a:*eqdf2*(.text*)
-    *libgcc.a:*gedf2*(.text*)
-    *libgcc.a:*ledf2*(.text*)
-    *libgcc.a:*unorddf2*(.text*)
-    *libgcc.a:*extendsfdf2*(.text*)
-    *libgcc.a:*truncdfsf2*(.text*)
-    *libgcc.a:*save-restore*(.text*)
-    *libgcc.a:*fixsfsi*(.text*)
-    *libgcc.a:*floatsisf*(.text*)
-    *libgcc.a:*fixunssfsi*(.text*)
-    *libgcc.a:*floatunsisf*(.text*)
-
-    *libc.a:*libm_machine_riscv_s_sqrt*(.text*)
-    *libc.a:*libm_machine_riscv_sf_sqrt*(.text*)
-    *libc.a:*libm_math_s_acos*(.text*)
-    *libc.a:*libm_math_sf_asin*(.text*)
-    *libc.a:*libm_math_sf_atan2*(.text*)
-    *libc.a:*libm_math_sf_atan*(.text*)
-    *libc.a:*libm_math_s_atan*(.text*)
-    *libc.a:*libm_math_sf_sin*(.text*)
-    *libc.a:*libm_math_sf_cos*(.text*)
-    *libc.a:*libm_math_k_sin*(.text*)
-    *libc.a:*libm_math_k_cos*(.text*)
-    *libc.a:*libm_math_kf_sin*(.text*)
-    *libc.a:*libm_math_kf_cos*(.text*)
-    *libc.a:*libm_math_sf_rem_pio2*(.text*)
-    *libc.a:*libm_math_kf_rem_pio2*(.text*)
-    *libc.a:*libm_math_s_rem_pio2*(.text*)
-    *libc.a:*libm_math_k_rem_pio2*(.text*)
-    *libc.a:*libm_common_math_err*(.text*)
-    *libc.a:*libm_machine_riscv_s_isnan*(.text*)
-    *libc.a:*libm_machine_riscv_sf_isnan*(.text*)
+    /* Soft-float + libm intentionally NOT in ZW on this branch — default
+     * hot path is fixed-point. Alternate Mahony/Comp float math lives in NZW. */
     *libc.a:*memset*(.text*)
     *libc.a:*memcpy*(.text*)
-
-    *libm.a:*sqrt*(.text*)
-    *libm.a:*acos*(.text*)
-    *libm.a:*asin*(.text*)
-    *libm.a:*atan2*(.text*)
-    *libm.a:*atan*(.text*)
-    *libm.a:*sin*(.text*)
-    *libm.a:*cos*(.text*)
-    *libm.a:*isnan*(.text*)
-    *libm.a:*rem_pio2*(.text*)
-    *libm.a:*k_sin*(.text*)
-    *libm.a:*k_cos*(.text*)
-
-    /* newlib-nano (riscv-none-elf --specs=nano.specs) — selective hot math */
-    *libm_nano.a:*sqrt*(.text*)
-    *libm_nano.a:*acos*(.text*)
-    *libm_nano.a:*asin*(.text*)
-    *libm_nano.a:*atan2*(.text*)
-    *libm_nano.a:*atan*(.text*)
-    *libm_nano.a:*sin*(.text*)
-    *libm_nano.a:*cos*(.text*)
-    *libm_nano.a:*fabs*(.text*)
-    *libm_nano.a:*nan*(.text*)
-    *libm_nano.a:*rem_pio2*(.text*)
-    *libm_nano.a:*k_sin*(.text*)
-    *libm_nano.a:*k_cos*(.text*)
-    *libm_nano.a:*kf_sin*(.text*)
-    *libm_nano.a:*kf_cos*(.text*)
     *libc_nano.a:*memset*(.text*)
     *libc_nano.a:*memcpy*(.text*)
+    *libgcc.a:*save-restore*(.text*)
+    /* 64-bit integer helpers (RV M is 32-bit mul/div; di3 for int64 quotients) */
+    *libgcc.a:*_divdi3.o(.text .text.*)
+    *libgcc.a:*_udivdi3.o(.text .text.*)
+    *libgcc.a:*_moddi3.o(.text .text.*)
+    *libgcc.a:*_umoddi3.o(.text .text.*)
+    *libgcc.a:*muldi3.o(.text .text.*)
+    *libgcc.a:*divdi3*(.text*)
+    *libgcc.a:*udivdi3*(.text*)
+
 
     . = ALIGN(4);
   } >FLASH AT>FLASH

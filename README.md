@@ -1,10 +1,10 @@
 # CH32V203G6U6 + LSM6DSV + multi-algo fusion
 
-面向 **CH32V203G6U6** 的裸机姿态固件：通过 **SPI** 读取 **LSM6DSV** 六轴 IMU，经可切换的 **6DOF** 融合算法输出四元数与欧拉角。默认 **VQF**（[dusking1/vqf-c](https://github.com/DusKing1/vqf-c)）在 **zero-wait Flash** 执行；可选 **Mahony** / **complementary** 从 NZW 拷入 **ALGO_RAM** 后在 SRAM 执行。算法选择持久化在 Flash 标志位。
+面向 **CH32V203G6U6** 的裸机姿态固件：通过 **SPI** 读取 **LSM6DSV** 六轴 IMU，经可切换的 **6DOF** 融合算法输出四元数与欧拉角。默认 **VQF-fxp**（固定小数、VQF 结构；见 `Middleware/vqf-fxp/`）在 **zero-wait Flash** 执行；浮点 [dusking1/vqf-c](https://github.com/DusKing1/vqf-c) 源码保留但本分支不链入；可选 **Mahony** / **complementary** 从 NZW 拷入 **ALGO_RAM** 后在 SRAM 执行。算法选择持久化在 Flash 标志位。
 
 > **Schematic note:** 原理图主控为 **AT32F423KCU7-4**；本仓库固件目标为 **CH32V203**，在 AF 允许处对齐同名网络（尤其 **LSM SPI PA4–PA7**）。UART/CAN 在 CH32 上的复用与 AT32 不同，见下表。
 
-Short English: Bare-metal CH32V203G6U6 + LSM6DSV (**SPI** mode 3) with selectable 6DOF fusion (**VQF** default in ZW Flash; **Mahony** / **complementary** execute from **SRAM** after boot memcpy). **1 kHz** Euler on **USART2 binary @ 921600** + **CAN1 @ 1 Mbit** (`0x321`). Algo flag in NZW @ `0x37000`. Self-contained `Platform/` + GCC `Makefile`.
+Short English: Bare-metal CH32V203G6U6 + LSM6DSV (**SPI** mode 3) with selectable 6DOF fusion (**VQF-fxp** fixed-point default in ZW Flash on `feat/vqf-fixedpoint-rv`; **Mahony** / **complementary** execute from **SRAM**). **1 kHz** Euler as **int16 millideg** on **USART2 binary @ 921600** (magic `A5 5B`) + **CAN1 @ 1 Mbit** (`0x321`). Algo flag in NZW @ `0x37000`.
 
 仓库：https://github.com/Mathonix/ch32v203-lsm6dsv-vqfc
 
@@ -64,7 +64,7 @@ WCH datasheet note: **advertised Flash bytes = zero-wait R0WAIT only**. For V203
 | Output section | Region | Contents |
 |----------------|--------|----------|
 | `.init` / `.vector` | `FLASH` | Reset trampoline + vector table |
-| `.text_zw` | `FLASH` | `SystemInit`, **`.text.hot`** (`fusion_sample_step` / `fusion_run_1khz` / Euler / VQF wrappers), VQF hot graph, IMU/SPI, UART binary + CAN TX, soft-float + libm |
+| `.text_zw` | `FLASH` | `SystemInit`, **`.text.hot`** (`fusion_run_1khz` / VQF-fxp / Euler mdeg), IMU/SPI Q16 read, UART `A5 5B` + CAN TX, integer `libgcc` (`mul`/`mulh`/`div` + `__divdi3`) — **no soft-float/libm** |
 | `.text_nzw` | `FLASH_NZW` | Cold/init + cold VQF (`initVqf`/mag/setters) |
 | `.text` / `.fini` | `FLASH_NZW` | `main`, printf, `algo_cfg_*`, remaining libc |
 | `.algo_ram` | `ALGO_RAM` AT>`FLASH_NZW` | Mahony + complementary code (startup memcpy LMA→VMA) |
@@ -78,17 +78,65 @@ Goal: **1 kHz VQF output** with **every** high-frequency callee in R0WAIT (`addr
 
 1. LSM6DSV XL+GY ODR = **true 1000 Hz** via HAODR (`HAODR_CFG.HAODR_SEL=1`, CTRL1/CTRL2=`0x19`). Without HAODR the same ODR code is 960 Hz.
 2. `initVqf(1.0f/1000, 1.0f/1000, 5.0f)`.
-3. Tight loop: `FLASH_ZW fusion_run_1khz()` → `fusion_sample_step` → IMU → `fusion_active->update` / `get_quat` → Euler → UART + CAN. VQF callees stay ZW; Mahony/Comp run from ALGO_RAM via function pointers.
-4. Verify: `make verify-zw` checks VQF hot symbols `< 0x8000` and Mahony/Comp symbols in ALGO_RAM. Example:
+3. Tight loop (ALGO_VQF): `FLASH_ZW fusion_run_1khz()` → `lsm6dsv_read_acc_gyr_fxp` → `vqfx_update_gyr/acc` → `vqfx_get_euler_mdeg` → UART `A5 5B` + CAN. Mahony/Comp use NZW float loop + ALGO_RAM.
+4. Verify: `make verify-zw` checks VQF-fxp hot symbols `< 0x8000`, soft-float **not** in ZW, Mahony/Comp in ALGO_RAM. Example:
 
 ```bash
 make PREFIX=riscv64-unknown-elf-
 make verify-zw
-riscv64-unknown-elf-nm -n build/firmware.elf | egrep 'updateGyr|fusion_sample|mahony_|comp_'
+riscv64-unknown-elf-nm -n build/firmware.elf | egrep 'vqfx_|fusion_run|mahony_|__addsf3'
 ```
 
 GNU ld **region-list overflow** (`>FLASH FLASH_NZW`) is **not** supported by this toolchain’s `ld` 2.44 (syntax error), so placement is **explicit**.
 
+
+## Fixed-point VQF (`feat/vqf-fixedpoint-rv`)
+
+**Honesty label:** this is a **VQF-structured fixed-point** 6DOF filter inspired by [dusking1/vqf-c](https://github.com/DusKing1/vqf-c) (strapdown `gyrQuat` + inclination `accQuat` + light bias), **not** a bit-exact full Laidig VQF port (no Kalman `biasP` / rest-LP / mag path). Sources: `Middleware/vqf-fxp/`.
+
+### Q-format
+
+| Quantity | Format | Scale |
+|----------|--------|-------|
+| Quaternion wxyz | **Q30** | `1.0 = 1<<30` |
+| Gyro rates | **Q16** rad/s | `1.0 rad/s = 65536` |
+| Accel | **Q16** m/s² | `1.0 m/s² = 65536` |
+| Euler output | int32 / int16 **millideg** | `1000 ≡ 1°` |
+
+### LSM6DSV raw → Q16 (no float on hot path)
+
+| Axis | FS | LSB weight (SI) | Integer scale |
+|------|----|-----------------|---------------|
+| Acc (±4 g) | 0.122 mg/LSB | ≈0.0011964 m/s² | **×78** → Q16 |
+| Gyr (±2000 dps) | 70 mdps/LSB | ≈0.0012217 rad/s | **×80** → Q16 |
+
+API: `lsm6dsv_read_acc_gyr_fxp()` in `Sensors/lsm6dsv/` (FLASH_ZW).
+
+### RISC-V M acceleration (QingKe V4B / `rv32imac`)
+
+- Compile: `-march=rv32imac_zicsr` (unchanged)
+- Q-format MACs use `int64_t` products → GCC emits **`mul` / `mulh`**
+- 32-bit quotients use hardware **`div`**; remaining int64 quotients use ZW **`__divdi3`**
+- Hot path: **no** soft-float (`__*sf3`) and **no** libm (`sinf`/`cosf`/`atan2f`/`asinf`/`sqrt`)
+- Small-angle Taylor sin/cos for gyro δq; fixed-point atan2/asin → millideg for Euler
+
+### UART / CAN @ 1 kHz
+
+| Bus | Format |
+|-----|--------|
+| USART2 | **11-byte** packet: magic **`A5 5B`**, `seq` u16 LE, roll/pitch/yaw **int16 millideg** LE, xor8 |
+| CAN1 `0x321` | 8 bytes: roll/pitch/yaw int16 millideg + seq (unchanged packing) |
+
+Legacy float UART magic `A5 5A` (17 bytes) remains for Mahony/Comp NZW path only.
+
+### ZW size (before → after on this branch)
+
+| Metric | Float VQF (`main` @ fbce22b) | VQF-fxp (this branch) |
+|--------|------------------------------|------------------------|
+| ZW (init+vector+text_zw) | **~24364 B** (~74% of 32K) | **~6548 B** (~20% of 32K) |
+| Soft-float / libm in ZW | yes (`__addsf3`, `atan2f`, …) | **none** (soft-float stays NZW for Mahony/Comp) |
+
+`make verify-zw` enforces fxp hot symbols in ZW and soft-float **not** in ZW.
 
 ## Multi-algorithm selection
 
@@ -96,7 +144,7 @@ GNU ld **region-list overflow** (`>FLASH FLASH_NZW`) is **not** supported by thi
 
 | ID | Name | Execute from |
 |----|------|--------------|
-| `0` / `ALGO_VQF` | VQF (default) | Zero-wait Flash (not copied to SRAM) |
+| `0` / `ALGO_VQF` | VQF-fxp (default) | Zero-wait Flash (fixed-point; not copied to SRAM) |
 | `1` / `ALGO_MAHONY` | Mahony AHRS 6DOF | ALGO_RAM (SRAM) after boot copy |
 | `2` / `ALGO_COMPLEMENTARY` | Complementary filter 6DOF | ALGO_RAM (SRAM) after boot copy |
 | invalid / erased | treated as VQF | ZW |
@@ -190,7 +238,9 @@ User/
   ch32v20x_conf.h
 Sensors/lsm6dsv/
   lsm6dsv.c/h
-Middleware/vqf-c/         # vendored dusking1/vqf-c (MIT)
+Middleware/vqf-fxp/       # fixed-point VQF-structured 6DOF (default hot path)
+  vqf_fxp.c / vqf_fxp.h / README.md
+Middleware/vqf-c/         # vendored dusking1/vqf-c (MIT) — kept, not linked on this branch
   vqf.c / vqf.h
 Middleware/fusion/        # unified API + Mahony + complementary
   fusion.h / fusion_vqf.c / fusion_select.c

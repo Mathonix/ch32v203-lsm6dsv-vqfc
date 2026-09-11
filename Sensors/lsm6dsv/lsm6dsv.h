@@ -42,6 +42,14 @@ int lsm6dsv_whoami(lsm6dsv_t *dev, uint8_t *id);
  */
 int lsm6dsv_read_acc_gyr(lsm6dsv_t *dev, float acc_mps2[3], float gyr_rads[3]);
 
+/**
+ * Read XL+GY raw and convert directly to Q16 (no float).
+ * Acc: m/s² Q16 (≈78 Q16 / LSB @ ±4 g, 0.122 mg/LSB).
+ * Gyr: rad/s Q16 (≈80 Q16 / LSB @ ±2000 dps, 70 mdps/LSB).
+ * FLASH_ZW hot path for fixed-point fusion.
+ */
+int lsm6dsv_read_acc_gyr_fxp(lsm6dsv_t *dev, int32_t acc_q16[3], int32_t gyr_q16[3]);
+
 #ifdef __cplusplus
 }
 #endif

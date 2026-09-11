@@ -145,7 +145,7 @@ static int16_t le16(const uint8_t *p)
     return (int16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
 }
 
-FLASH_ZW int lsm6dsv_read_acc_gyr(lsm6dsv_t *dev, float acc_mps2[3], float gyr_rads[3])
+FLASH_NZW int lsm6dsv_read_acc_gyr(lsm6dsv_t *dev, float acc_mps2[3], float gyr_rads[3])
 {
     uint8_t raw[12];
     if (dev == 0 || acc_mps2 == 0 || gyr_rads == 0) {
@@ -172,5 +172,40 @@ FLASH_ZW int lsm6dsv_read_acc_gyr(lsm6dsv_t *dev, float acc_mps2[3], float gyr_r
     gyr_rads[0] = (float)gx * gyr_scale;
     gyr_rads[1] = (float)gy * gyr_scale;
     gyr_rads[2] = (float)gz * gyr_scale;
+    return 0;
+}
+
+/*
+ * Integer scales (rounded):
+ *   acc: 0.122 mg/LSB * 1e-3 * 9.80665 * 65536 ≈ 78.41 → 78
+ *   gyr: 70 mdps/LSB * 1e-3 * (pi/180) * 65536 ≈ 80.07 → 80
+ */
+#define ACC_Q16_PER_LSB  78
+#define GYR_Q16_PER_LSB  80
+
+FLASH_ZW int lsm6dsv_read_acc_gyr_fxp(lsm6dsv_t *dev, int32_t acc_q16[3], int32_t gyr_q16[3])
+{
+    uint8_t raw[12];
+    if (dev == 0 || acc_q16 == 0 || gyr_q16 == 0) {
+        return -1;
+    }
+    if (spi_read_regs(REG_OUTX_L_G, raw, 12) != 0) {
+        return -2;
+    }
+
+    int16_t gx = le16(&raw[0]);
+    int16_t gy = le16(&raw[2]);
+    int16_t gz = le16(&raw[4]);
+    int16_t ax = le16(&raw[6]);
+    int16_t ay = le16(&raw[8]);
+    int16_t az = le16(&raw[10]);
+
+    /* Widening mul uses RV M; keep in int32 */
+    acc_q16[0] = (int32_t)ax * ACC_Q16_PER_LSB;
+    acc_q16[1] = (int32_t)ay * ACC_Q16_PER_LSB;
+    acc_q16[2] = (int32_t)az * ACC_Q16_PER_LSB;
+    gyr_q16[0] = (int32_t)gx * GYR_Q16_PER_LSB;
+    gyr_q16[1] = (int32_t)gy * GYR_Q16_PER_LSB;
+    gyr_q16[2] = (int32_t)gz * GYR_Q16_PER_LSB;
     return 0;
 }

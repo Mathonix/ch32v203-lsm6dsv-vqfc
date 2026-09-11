@@ -3,7 +3,7 @@
 #
 #   make            # build build/firmware.elf
 #   make flash      # optional: openocd + wch-link (adjust OPENOCD)
-#   make verify-zw  # VQF hot-path symbols still in R0WAIT
+#   make verify-zw  # VQF-fxp hot-path symbols still in R0WAIT
 #
 # Flash: G6U6 R0WAIT=32KB zero-wait + ~188KB NZW code + 4KB algo_cfg @ 0x37000
 # ALGO_RAM 3KB @ 0x20000000 for Mahony/Comp SRAM execute; RAM 7KB remainder.
@@ -42,6 +42,7 @@ INCLUDES := \
   -IPlatform \
   -ISensors/lsm6dsv \
   -IMiddleware/vqf-c \
+  -IMiddleware/vqf-fxp \
   -IMiddleware/fusion
 
 CFLAGS   := $(MCUFLAGS) $(DEFS) $(INCLUDES) -Os -g3 -Wall -Wextra
@@ -61,7 +62,7 @@ C_SRCS := \
   Platform/platform_ch32v203.c \
   Platform/algo_cfg.c \
   Sensors/lsm6dsv/lsm6dsv.c \
-  Middleware/vqf-c/vqf.c \
+  Middleware/vqf-fxp/vqf_fxp.c \
   Middleware/fusion/fusion_vqf.c \
   Middleware/fusion/fusion_select.c \
   Middleware/fusion/mahony.c \
@@ -75,7 +76,7 @@ OBJS := $(addprefix $(BUILD)/,$(C_SRCS:.c=.o) $(AS_SRCS:.S=.o))
 
 all: $(BUILD)/$(TARGET).elf $(BUILD)/$(TARGET).hex $(BUILD)/$(TARGET).bin size
 
-$(BUILD)/$(TARGET).elf: $(OBJS)
+$(BUILD)/$(TARGET).elf: $(OBJS) Startup/link.ld
 	@mkdir -p $(dir $@)
 	$(CC) $(OBJS) $(LDFLAGS) -o $@
 

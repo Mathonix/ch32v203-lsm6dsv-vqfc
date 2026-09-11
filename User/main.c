@@ -9,7 +9,7 @@
  *   (Schematic UART nets are PA0/PA1 on AT32; CH32 has no USART data AF there)
  * - CAN1 Remap1: PA11=RX, PA12=TX @ 1 Mbit, std ID 0x321
  *   (Schematic CAN nets are PA2/PA3 on AT32; CH32 cannot remap CAN there)
- * - Default algo: VQF from zero-wait Flash (not copied to SRAM)
+ * - Default algo: fixed-point VQF-structured (vqf-fxp) in zero-wait Flash
  * - Alternates (Mahony / complementary): NZW LMA → ALGO_RAM, execute from SRAM
  *
  * Units: gyroscope rad/s, accelerometer m/s².
@@ -24,6 +24,7 @@
 #include "flash_zw.h"
 #include "lsm6dsv.h"
 #include "fusion.h"
+#include "vqf_fxp.h"
 #include "algo_cfg.h"
 
 #include <math.h>
@@ -35,7 +36,7 @@
 #endif
 
 /** Quaternion (w,x,y,z) → roll/pitch/yaw in degrees (aerospace ZYX). ZW. */
-FLASH_ZW static void quat_to_euler_deg(const float q[4], float *roll, float *pitch, float *yaw)
+FLASH_NZW static void quat_to_euler_deg(const float q[4], float *roll, float *pitch, float *yaw)
 {
     const float rad2deg = 57.2957795f;
     const float w = q[0], x = q[1], y = q[2], z = q[3];
@@ -72,7 +73,11 @@ FLASH_NZW static void fusion_uart_print_status(const float q[4])
  * 1 kHz hot body in zero-wait Flash: IMU → fusion->update → get_quat.
  * VQF callees stay ZW; Mahony/Comp run from ALGO_RAM via function pointers.
  */
-FLASH_ZW int fusion_sample_step(lsm6dsv_t *imu, float q_out[4], float dt)
+/**
+ * Float sample step — used by Mahony / complementary (ALGO_RAM).
+ * Not used when ALGO_VQF (fixed-point path below).
+ */
+FLASH_NZW int fusion_sample_step(lsm6dsv_t *imu, float q_out[4], float dt)
 {
     float acc[3], gyr[3];
     if (lsm6dsv_read_acc_gyr(imu, acc, gyr) != 0) {
@@ -83,7 +88,56 @@ FLASH_ZW int fusion_sample_step(lsm6dsv_t *imu, float q_out[4], float dt)
     return 0;
 }
 
-FLASH_ZW void fusion_run_1khz(lsm6dsv_t *imu)
+/** Clamp millideg to int16 for UART/CAN. */
+FLASH_ZW static int16_t mdeg_to_i16(int32_t mdeg)
+{
+    if (mdeg > 32767) {
+        return (int16_t)32767;
+    }
+    if (mdeg < -32768) {
+        return (int16_t)-32768;
+    }
+    return (int16_t)mdeg;
+}
+
+/**
+ * Fixed-point 1 kHz body (ALGO_VQF): raw LSM → Q16 → vqfx → millideg → UART/CAN.
+ * No soft-float / libm on this path.
+ */
+FLASH_ZW static void fusion_run_1khz_fxp(lsm6dsv_t *imu)
+{
+    uint32_t last_ms = platform_millis();
+    const uint32_t sample_period_ms = 1u;
+    uint16_t seq = 0u;
+    int32_t acc_q16[3], gyr_q16[3];
+    int32_t roll_m, pitch_m, yaw_m;
+
+    while (1) {
+        uint32_t now = platform_millis();
+        if ((uint32_t)(now - last_ms) < sample_period_ms) {
+            continue;
+        }
+        last_ms = now;
+
+        if (lsm6dsv_read_acc_gyr_fxp(imu, acc_q16, gyr_q16) != 0) {
+            platform_delay_ms(1);
+            continue;
+        }
+        vqfx_update_gyr(gyr_q16);
+        vqfx_update_acc(acc_q16);
+        vqfx_get_euler_mdeg(&roll_m, &pitch_m, &yaw_m);
+
+        int16_t r = mdeg_to_i16(roll_m);
+        int16_t p = mdeg_to_i16(pitch_m);
+        int16_t y = mdeg_to_i16(yaw_m);
+        (void)platform_uart_send_euler_i16(seq, r, p, y);
+        (void)platform_can_send_euler_i16(seq, r, p, y);
+        seq++;
+    }
+}
+
+/** Mahony / complementary 1 kHz loop (float) — NZW; soft-float OK here. */
+FLASH_NZW static void fusion_run_1khz_float(lsm6dsv_t *imu)
 {
     uint32_t last_ms = platform_millis();
     const uint32_t sample_period_ms = 1u;
@@ -120,6 +174,13 @@ FLASH_ZW void fusion_run_1khz(lsm6dsv_t *imu)
         }
 #endif
     }
+}
+
+FLASH_ZW void fusion_run_1khz(lsm6dsv_t *imu)
+{
+    /* Default ALGO_VQF integer path only — never returns.
+     * Mahony/Comp use fusion_run_1khz_float from main (NZW). */
+    fusion_run_1khz_fxp(imu);
 }
 
 /** Parse "SETALGO n" from a line buffer; returns 0 and sets *id_out on success. */
@@ -189,7 +250,7 @@ FLASH_NZW static void fusion_poll_setalgo_window(uint32_t wait_ms)
 FLASH_NZW int main(void)
 {
     platform_init();
-    platform_uart_printf("\nCH32V203 + LSM6DSV SPI + multi-algo fusion (6DOF, 1 kHz)\n");
+    platform_uart_printf("\nCH32V203 + LSM6DSV SPI + multi-algo fusion (6DOF, 1 kHz, VQF-fxp)\n");
     platform_uart_printf("Schematic MCU=AT32F423; this FW=CH32V203 (SPI nets match; UART/CAN AF differ)\n");
     platform_uart_printf("SPI1 PA4=CS PA5=SCK PA6=MISO PA7=MOSI mode3; INT1/2=PB0/PB1 unused\n");
     platform_uart_printf("USART2 PA2=TX PA3=RX @ %u (RM: no USART data AF on schematic PA0/PA1)\n",
@@ -237,11 +298,15 @@ FLASH_NZW int main(void)
     fusion_active->init(LSM6DSV_ODR_HZ);
     platform_uart_printf("Fusion init @ %.0f Hz\n", (double)LSM6DSV_ODR_HZ);
     if (fusion_active_id == ALGO_VQF) {
-        platform_uart_printf("Hot path: VQF in ZW Flash; sample+euler+uart+can @ 1 kHz\n");
+        platform_uart_printf("Hot path: VQF-fxp (Q30/Q16) in ZW; millideg UART A5 5B + CAN @ 1 kHz\n");
     } else {
         platform_uart_printf("Hot path: algo in ALGO_RAM (SRAM); I/O+euler in ZW @ 1 kHz\n");
     }
 
-    fusion_run_1khz(&imu);
+    if (fusion_active_id == ALGO_VQF) {
+        fusion_run_1khz(&imu);
+    } else {
+        fusion_run_1khz_float(&imu);
+    }
     return 0;
 }

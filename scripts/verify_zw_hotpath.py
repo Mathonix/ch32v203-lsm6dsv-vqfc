@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Verify VQF 1 kHz hot path symbols live in zero-wait Flash (< 0x8000).
+"""Verify VQF-fxp 1 kHz hot path symbols live in zero-wait Flash (< 0x8000).
 
 Also reports ALGO_RAM placement for Mahony/Comp (must be in SRAM @ 0x20000000+).
+On feat/vqf-fixedpoint-rv the default hot path is integer (no soft-float / libm in ZW).
 """
 from __future__ import annotations
 
@@ -15,63 +16,41 @@ ALGO_RAM_BASE = 0x20000000
 ALGO_RAM_END = 0x20001000
 
 REQUIRED = [
-    "updateGyr",
-    "updateAcc",
-    "getQuat6D",
-    "quatMultiply",
-    "quatRotate",
-    "filterVec",
-    "norm",
-    "normalize",
-    "matrix3Multiply",
-    "filterCoeffs",
-    "gainFromTau",
-    "lsm6dsv_read_acc_gyr",
+    "vqfx_update_gyr",
+    "vqfx_update_acc",
+    "vqfx_get_quat6d",
+    "vqfx_get_euler_mdeg",
+    "lsm6dsv_read_acc_gyr_fxp",
     "platform_spi_xfer",
     "platform_lsm_cs",
-    "fusion_sample_step",
     "fusion_run_1khz",
     "platform_uart_write_bytes",
-    "platform_uart_send_euler_bin",
-    "platform_can_send_euler",
-    "atan2f",
-    "asinf",
+    "platform_uart_send_euler_i16",
+    "platform_can_send_euler_i16",
 ]
 
-# VQF fusion wrappers should also be ZW
-REQUIRED_VQF_WRAP = [
-    "vqf_fusion_update",
-    "vqf_fusion_get_quat",
+# Soft-float / libm must NOT appear in ZW on this branch (default path is fxp)
+FORBIDDEN_IN_ZW = [
+    "__addsf3",
+    "__mulsf3",
+    "__divsf3",
+    "atan2f",
+    "asinf",
+    "sinf",
+    "cosf",
+    "sqrtf",
+    "sqrt",
+    "acos",
 ]
 
 HOT_FUNCS = (
-    "updateGyr",
-    "updateAcc",
-    "fusion_sample_step",
+    "vqfx_update_gyr",
+    "vqfx_update_acc",
+    "vqfx_get_euler_mdeg",
     "fusion_run_1khz",
-    "filterVec",
-    "quatMultiply",
-    "quatRotate",
-    "norm",
-    "normalize",
-    "matrix3Multiply",
-    "sinf",
-    "_sinf",
-    "cosf",
-    "_cosf",
-    "sqrt",
-    "acos",
-    "asinf",
-    "atan2f",
-    "atanf",
-    "__kernel_sinf",
-    "__kernel_cosf",
-    "__rem_pio2f",
-    "platform_uart_write_bytes",
-    "platform_uart_send_euler_bin",
-    "platform_can_send_euler",
-    "vqf_fusion_update",
-    "vqf_fusion_get_quat",
+    "lsm6dsv_read_acc_gyr_fxp",
+    "platform_uart_send_euler_i16",
+    "platform_can_send_euler_i16",
 )
 
 ALGO_RAM_SYMS = [
@@ -153,28 +132,47 @@ def main() -> int:
     errors: list[str] = []
 
     print("=== Hot symbol addresses (must be < 0x8000) ===")
-    print(f"{'symbol':<28} {'addr':>10}  zone")
-    for name in REQUIRED + REQUIRED_VQF_WRAP:
+    print(f"{'symbol':<32} {'addr':>10}  zone")
+    for name in REQUIRED:
         if name not in syms:
-            # static wrappers may be local — try with prefix or skip soft fail
             errors.append(f"MISSING symbol: {name}")
-            print(f"{name:<28} {'MISSING':>10}")
+            print(f"{name:<32} {'MISSING':>10}")
             continue
         addr = syms[name]
         zone = "ZW" if addr < ZW_LIMIT else "NZW"
-        print(f"{name:<28} 0x{addr:08x}  {zone}")
+        print(f"{name:<32} 0x{addr:08x}  {zone}")
         if addr >= ZW_LIMIT:
             errors.append(f"{name} @ 0x{addr:x} >= 0x8000")
+
+    print("\n=== Integer helpers (divdi3) should be ZW if linked ===")
+    for name in ("__divdi3", "__udivdi3"):
+        if name in syms:
+            addr = syms[name]
+            zone = "ZW" if addr < ZW_LIMIT else "NZW"
+            print(f"{name:<32} 0x{addr:08x}  {zone}")
+            if addr >= ZW_LIMIT:
+                errors.append(f"{name} @ 0x{addr:x} not in ZW")
+
+    print("\n=== Soft-float / libm must not be in ZW ===")
+    for name in FORBIDDEN_IN_ZW:
+        if name not in syms:
+            print(f"{name:<32} (not linked)")
+            continue
+        addr = syms[name]
+        zone = "ZW" if addr < ZW_LIMIT else "NZW"
+        print(f"{name:<32} 0x{addr:08x}  {zone}")
+        if addr < ZW_LIMIT:
+            errors.append(f"{name} still in ZW @ 0x{addr:x}")
 
     print("\n=== ALGO_RAM symbols (must be in [0x20000000, 0x20001000)) ===")
     for name in ALGO_RAM_SYMS:
         if name not in syms:
             errors.append(f"MISSING algo symbol: {name}")
-            print(f"{name:<28} {'MISSING':>10}")
+            print(f"{name:<32} {'MISSING':>10}")
             continue
         addr = syms[name]
         ok = ALGO_RAM_BASE <= addr < ALGO_RAM_END
-        print(f"{name:<28} 0x{addr:08x}  {'ALGO_RAM' if ok else 'BAD'}")
+        print(f"{name:<32} 0x{addr:08x}  {'ALGO_RAM' if ok else 'BAD'}")
         if not ok:
             errors.append(f"{name} @ 0x{addr:x} not in ALGO_RAM")
 
@@ -186,7 +184,6 @@ def main() -> int:
         bad = []
         for addr, name in jal_targets(elf, func):
             if addr >= ZW_LIMIT:
-                # Allow calls into ALGO_RAM only from fusion_sample_step via jalr — jal is absolute
                 bad.append((addr, name))
         status = "OK" if not bad else "FAIL"
         print(f"{func}: {status}")
@@ -205,14 +202,22 @@ def main() -> int:
     if zw > 32768:
         errors.append(f"ZW overflow: {zw} > 32768")
     if algo > 4096:
-        errors.append(f"ALGO_RAM overflow: {algo} > 3072")
+        errors.append(f"ALGO_RAM overflow: {algo} > 4096")
+
+    # Report mul/div usage hint
+    dump = run(["riscv64-unknown-elf-objdump", "-d", str(elf)])
+    mul_n = len(re.findall(r"\bmul\b", dump))
+    mulh_n = len(re.findall(r"\bmulh\b", dump))
+    div_n = len(re.findall(r"\bdiv\b", dump))
+    print(f"\n=== RV M insn counts (whole image) ===")
+    print(f"mul={mul_n} mulh={mulh_n} div={div_n}")
 
     if errors:
         print("\nVERIFY FAILED:")
         for e in errors:
             print(" -", e)
         return 1
-    print("\nVERIFY OK: VQF hot path in ZW; Mahony/Comp in ALGO_RAM.")
+    print("\nVERIFY OK: VQF-fxp hot path in ZW (integer); Mahony/Comp in ALGO_RAM.")
     return 0
 
 

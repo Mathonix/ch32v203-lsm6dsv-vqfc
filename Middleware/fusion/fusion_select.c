@@ -12,7 +12,7 @@ FLASH_NZW const char *fusion_algo_name(algo_id_t id)
 {
     switch (id) {
     case ALGO_VQF:
-        return "VQF (ZW Flash)";
+        return "VQF-fxp (ZW Flash)";
     case ALGO_MAHONY:
         return "Mahony 6DOF (SRAM)";
     case ALGO_COMPLEMENTARY:

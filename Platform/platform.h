@@ -69,10 +69,21 @@ void platform_uart_write_bytes(const uint8_t *p, unsigned n);
 unsigned platform_uart_send_euler_bin(uint16_t seq, float roll_deg, float pitch_deg, float yaw_deg);
 
 /**
+ * 11-byte int16 millideg UART packet (magic A5 5B + seq + 3×i16 LE + xor). FLASH_ZW.
+ * Preferred 1 kHz path — no float.
+ */
+unsigned platform_uart_send_euler_i16(uint16_t seq, int16_t roll_mdeg, int16_t pitch_mdeg,
+                                      int16_t yaw_mdeg);
+
+/**
  * Non-blocking CAN TX of one 8-byte Euler frame (mailbox 0). FLASH_ZW.
  * Returns 0 on queued, -1 if mailbox busy (dropped after brief poll).
  */
 int platform_can_send_euler(uint16_t seq, float roll_deg, float pitch_deg, float yaw_deg);
+
+/** CAN TX from millideg int16 (no float). FLASH_ZW. */
+int platform_can_send_euler_i16(uint16_t seq, int16_t roll_mdeg, int16_t pitch_mdeg,
+                                int16_t yaw_mdeg);
 
 /** Cumulative CAN drops when mailbox was busy (debug). */
 extern volatile uint32_t platform_can_drop_count;

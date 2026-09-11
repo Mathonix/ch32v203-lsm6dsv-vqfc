@@ -253,7 +253,7 @@ FLASH_ZW void platform_uart_write_bytes(const uint8_t *p, unsigned n)
     }
 }
 
-FLASH_ZW unsigned platform_uart_send_euler_bin(uint16_t seq, float roll_deg,
+FLASH_NZW unsigned platform_uart_send_euler_bin(uint16_t seq, float roll_deg,
                                                float pitch_deg, float yaw_deg)
 {
     uint8_t pkt[17];
@@ -287,6 +287,53 @@ FLASH_ZW unsigned platform_uart_send_euler_bin(uint16_t seq, float roll_deg,
     pkt[16] = x;
     platform_uart_write_bytes(pkt, 17u);
     return 17u;
+}
+
+
+FLASH_ZW unsigned platform_uart_send_euler_i16(uint16_t seq, int16_t roll_mdeg,
+                                               int16_t pitch_mdeg, int16_t yaw_mdeg)
+{
+    /* magic A5 5B distinguishes int16 millideg variant from float A5 5A */
+    uint8_t pkt[11];
+    pkt[0] = 0xA5u;
+    pkt[1] = 0x5Bu;
+    pkt[2] = (uint8_t)(seq & 0xFFu);
+    pkt[3] = (uint8_t)((seq >> 8) & 0xFFu);
+    pkt[4] = (uint8_t)((uint16_t)roll_mdeg & 0xFFu);
+    pkt[5] = (uint8_t)(((uint16_t)roll_mdeg >> 8) & 0xFFu);
+    pkt[6] = (uint8_t)((uint16_t)pitch_mdeg & 0xFFu);
+    pkt[7] = (uint8_t)(((uint16_t)pitch_mdeg >> 8) & 0xFFu);
+    pkt[8] = (uint8_t)((uint16_t)yaw_mdeg & 0xFFu);
+    pkt[9] = (uint8_t)(((uint16_t)yaw_mdeg >> 8) & 0xFFu);
+    uint8_t x = 0u;
+    for (unsigned i = 0; i < 10u; i++) {
+        x ^= pkt[i];
+    }
+    pkt[10] = x;
+    platform_uart_write_bytes(pkt, 11u);
+    return 11u;
+}
+
+FLASH_ZW int platform_can_send_euler_i16(uint16_t seq, int16_t roll_mdeg,
+                                         int16_t pitch_mdeg, int16_t yaw_mdeg)
+{
+    unsigned spins = 2u;
+    while ((CAN1_TSTATR & CAN_TSTATR_TME0) == 0u) {
+        if (spins == 0u) {
+            platform_can_drop_count++;
+            return -1;
+        }
+        spins--;
+    }
+
+    uint32_t id = ((uint32_t)(PLATFORM_CAN_STD_ID & 0x7FFu) << 21);
+    CAN1_TXMDTR0 = 8u;
+    CAN1_TXMDLR0 = ((uint32_t)(uint16_t)roll_mdeg) |
+                   ((uint32_t)(uint16_t)pitch_mdeg << 16);
+    CAN1_TXMDHR0 = ((uint32_t)(uint16_t)yaw_mdeg) |
+                   ((uint32_t)seq << 16);
+    CAN1_TXMIR0 = id | CAN_TXMIR_TXRQ;
+    return 0;
 }
 
 /* ---- CAN1 init (NZW) + TX (ZW) ---- */
@@ -350,7 +397,7 @@ FLASH_NZW static void can1_init(void)
     }
 }
 
-FLASH_ZW static int16_t millideg_i16(float deg)
+FLASH_NZW static int16_t millideg_i16(float deg)
 {
     float md = deg * 1000.0f;
     if (md > 32767.0f) {
@@ -361,7 +408,7 @@ FLASH_ZW static int16_t millideg_i16(float deg)
     return (int16_t)md;
 }
 
-FLASH_ZW int platform_can_send_euler(uint16_t seq, float roll_deg, float pitch_deg,
+FLASH_NZW int platform_can_send_euler(uint16_t seq, float roll_deg, float pitch_deg,
                                      float yaw_deg)
 {
     unsigned spins = 2u;
