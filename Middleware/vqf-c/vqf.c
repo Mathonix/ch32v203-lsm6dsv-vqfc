@@ -845,7 +845,8 @@ vqf_real_t getBiasEstimate(vqf_real_t out[3])
 
 void setBiasEstimate(vqf_real_t bias[3], vqf_real_t sigma)
 {
-    memcpy(state.bias, bias, sizeof(bias));
+    /* Local fix: sizeof(bias) is pointer width; copy 3 elements. */
+    memcpy(state.bias, bias, sizeof(state.bias));
     // std::copy(bias, bias+3, state.bias);
     if (sigma > 0) {
         vqf_real_t P = vqf_square(sigma*(vqf_real_t)(180.0*100.0/M_PIf));
@@ -944,7 +945,7 @@ void setTauAcc(vqf_real_t tauAcc)
     }
     params.tauAcc = tauAcc;
     vqf_double_t newB[3];
-    vqf_double_t newA[3];
+    vqf_double_t newA[2]; /* Local fix: accLpA has 2 coeffs (was newA[3] OOB memcpy) */
 
     filterCoeffs(params.tauAcc, coeffs.accTs, newB, newA);
     filterAdaptStateForCoeffChange(state.lastAccLp, 3, coeffs.accLpB, coeffs.accLpA, newB, newA, state.accLpState);
@@ -962,9 +963,9 @@ void setTauAcc(vqf_real_t tauAcc)
     }
     filterAdaptStateForCoeffChange(biasLp, 2, coeffs.accLpB, coeffs.accLpA, newB, newA, state.motionBiasEstBiasLpState);
 
-    memcpy(coeffs.accLpB, newB, sizeof(newB));
+    memcpy(coeffs.accLpB, newB, sizeof(coeffs.accLpB));
     // std::copy(newB, newB+3, coeffs.accLpB);
-    memcpy(coeffs.accLpA, newA, sizeof(newA));
+    memcpy(coeffs.accLpA, newA, sizeof(coeffs.accLpA));
     // std::copy(newA, newA+2, coeffs.accLpA);
 }
 
