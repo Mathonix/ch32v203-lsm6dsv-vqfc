@@ -1,8 +1,10 @@
 # CH32V203G6U6 + LSM6DSV + multi-algo fusion
 
-面向 **CH32V203G6U6** 的裸机姿态固件：通过 **I2C** 读取 **LSM6DSV** 六轴 IMU，经可切换的 **6DOF** 融合算法输出四元数与欧拉角。默认 **VQF**（[dusking1/vqf-c](https://github.com/DusKing1/vqf-c)）在 **zero-wait Flash** 执行；可选 **Mahony** / **complementary** 从 NZW 拷入 **ALGO_RAM** 后在 SRAM 执行。算法选择持久化在 Flash 标志位。
+面向 **CH32V203G6U6** 的裸机姿态固件：通过 **SPI** 读取 **LSM6DSV** 六轴 IMU，经可切换的 **6DOF** 融合算法输出四元数与欧拉角。默认 **VQF**（[dusking1/vqf-c](https://github.com/DusKing1/vqf-c)）在 **zero-wait Flash** 执行；可选 **Mahony** / **complementary** 从 NZW 拷入 **ALGO_RAM** 后在 SRAM 执行。算法选择持久化在 Flash 标志位。
 
-Short English: Bare-metal CH32V203G6U6 + LSM6DSV (I2C) with selectable 6DOF fusion (**VQF** default in ZW Flash; **Mahony** / **complementary** execute from **SRAM** after boot memcpy). **1 kHz** Euler on **USART1 binary @ 921600** + **CAN1 @ 1 Mbit** (`0x321`). Algo flag in NZW @ `0x37000`. Self-contained `Platform/` + GCC `Makefile`.
+> **Schematic note:** 原理图主控为 **AT32F423KCU7-4**；本仓库固件目标为 **CH32V203**，在 AF 允许处对齐同名网络（尤其 **LSM SPI PA4–PA7**）。UART/CAN 在 CH32 上的复用与 AT32 不同，见下表。
+
+Short English: Bare-metal CH32V203G6U6 + LSM6DSV (**SPI** mode 3) with selectable 6DOF fusion (**VQF** default in ZW Flash; **Mahony** / **complementary** execute from **SRAM** after boot memcpy). **1 kHz** Euler on **USART2 binary @ 921600** + **CAN1 @ 1 Mbit** (`0x321`). Algo flag in NZW @ `0x37000`. Self-contained `Platform/` + GCC `Makefile`.
 
 仓库：https://github.com/Mathonix/ch32v203-lsm6dsv-vqfc
 
@@ -12,17 +14,32 @@ Short English: Bare-metal CH32V203G6U6 + LSM6DSV (I2C) with selectable 6DOF fusi
 
 | 项目 | 约定 |
 |------|------|
-| MCU | **CH32V203G6U6**（QFN28） |
+| MCU (FW) | **CH32V203G6U6**（QFN28）；原理图 MCU 为 **AT32F423KCU7-4** |
 | Flash 布局 | **R0WAIT = 32 KB** ZW @ `0x00000000`；**NZW code 188 KB** @ `0x00008000`；**algo_cfg 4 KB** @ `0x00037000`（总 CodeFlash ≈ 224 KB） |
 | RAM | **10 KB** total：`ALGO_RAM` **4 KB** @ `0x20000000` + **6 KB** data/bss/stack @ `0x20001000` |
 | 内核系列 | CH32V20x **D6**（与 F6/C6/G6 同启动文件） |
-| IMU | **LSM6DSV**，I2C，**WHO_AM_I = 0x70**（ST DS13476 / lsm6dsv-pid） |
-| I2C 地址 | 默认 **0x6A**（7-bit，**SA0/SDO = GND**）；SA0 接 Vdd_IO 时为 **0x6B** |
-| I2C1 引脚 | **PB6 = SCL，PB7 = SDA**（WCH 常见默认映射，未使能 I2C1 remap） |
-| 调试串口 | **USART1 TX = PA9**，**921600** 8N1 二进制欧拉流（RX=PA10 已配置）；启动横幅仍用 printf |
-| CAN1 | **PA11 = CAN_RX，PA12 = CAN_TX**（默认 AF remap）；需外部收发器；**1 Mbit/s**，标准 ID **`0x321`** |
+| IMU | **LSM6DSV**，**SPI**，**WHO_AM_I = 0x70**（ST DS13476 / lsm6dsv-pid） |
+| SPI | **Mode 3** (CPOL=1 CPHA=1)；读寄存器地址 **OR 0x80**；软 CS |
 | USB | **USBD 关闭**（与 CAN 共用 512B SRAM，本工程只开 CAN） |
-| 上拉 | I2C 需外部上拉（典型 4.7 kΩ 至 Vdd_IO）；SDA/SCL 开漏；CAN 收发器侧按模块要求 |
+
+### Pin / net table (schematic AT32 vs this CH32 FW)
+
+| Net | Schematic (AT32F423) | This CH32V203 FW | Notes |
+|-----|----------------------|------------------|-------|
+| LSM_CS | PA4 | **PA4** GPIO SW CS (active low) | Match |
+| LSM_SCK | PA5 | **PA5** SPI1_SCK | Match |
+| LSM_MISO | PA6 | **PA6** SPI1_MISO | Match |
+| LSM_MOSI | PA7 | **PA7** SPI1_MOSI | Match |
+| LSM_INT1 | PB0 | PB0 input (unused) | Match pin; unused in code |
+| LSM_INT2 | PB1 | PB1 input (unused) | Match pin; unused in code |
+| UART_TX | PA0 (USART4) | **PA2** USART2_TX | CH32 RM: PA0=USART2_CTS only — no TX AF |
+| UART_RX | PA1 (USART4) | **PA3** USART2_RX | CH32 RM: PA1=USART2_RTS only — no RX AF |
+| CAN_RX | PA2 (CAN2) | **PA11** CAN1 Remap1 | CH32 CAN remaps: PA11/12, PB8/9, PD0/1 only |
+| CAN_TX | PA3 (CAN2) | **PA12** CAN1 Remap1 | No CAN AF on PA2/PA3 |
+| MAG_SCL/SDA | PB6/PB7 | *(not init)* | Mag I2C out of scope |
+| USB_DM/DP | PA11/PA12 | USBD off; pins used by CAN Remap1 | |
+
+UART: **USART2 @ 921600** 8N1 binary Euler + boot printf. CAN: **1 Mbit/s**, std ID **`0x321`**, transceiver required.
 
 若改用其它引脚，请同步修改 `Platform/platform_ch32v203.c` 并更新本文档。
 
@@ -47,7 +64,7 @@ WCH datasheet note: **advertised Flash bytes = zero-wait R0WAIT only**. For V203
 | Output section | Region | Contents |
 |----------------|--------|----------|
 | `.init` / `.vector` | `FLASH` | Reset trampoline + vector table |
-| `.text_zw` | `FLASH` | `SystemInit`, **`.text.hot`** (`fusion_sample_step` / `fusion_run_1khz` / Euler / VQF wrappers), VQF hot graph, IMU/I2C, UART binary + CAN TX, soft-float + libm |
+| `.text_zw` | `FLASH` | `SystemInit`, **`.text.hot`** (`fusion_sample_step` / `fusion_run_1khz` / Euler / VQF wrappers), VQF hot graph, IMU/SPI, UART binary + CAN TX, soft-float + libm |
 | `.text_nzw` | `FLASH_NZW` | Cold/init + cold VQF (`initVqf`/mag/setters) |
 | `.text` / `.fini` | `FLASH_NZW` | `main`, printf, `algo_cfg_*`, remaining libc |
 | `.algo_ram` | `ALGO_RAM` AT>`FLASH_NZW` | Mahony + complementary code (startup memcpy LMA→VMA) |
@@ -145,7 +162,7 @@ Public SPL bit headers do not fully document bit 24; the source of truth is WCH�
 #define FLASH_NZW_RODATA __attribute__((section(".rodata_nzw")))
 ```
 
-Marked cold today: `platform_init`, UART/I2C/CAN init, `platform_uart_printf`, `lsm6dsv_init`, `main`.
+Marked cold today: `platform_init`, UART/SPI/CAN init, `platform_uart_printf`, `lsm6dsv_init`, `main`.
 Marked hot: `fusion_sample_step`, `fusion_run_1khz`, `quat_to_euler_deg`, VQF wrappers, `platform_uart_write_bytes`, `platform_uart_send_euler_bin`, `platform_can_send_euler` via `FLASH_ZW`.
 
 ---
@@ -191,12 +208,15 @@ vendor/
 
 ## 功能概要
 
-### LSM6DSV
-- Soft-reset：CTRL1/CTRL2 power-down → CTRL3 `SW_RESET` → 轮询清除（对齐 ST PID）
-- ODR **1000 Hz**（HAODR：`HAODR_CFG=0x01`，CTRL1/CTRL2=`0x19` = `OP_MODE_HAODR|ODR_0x9`；同码在非 HAODR 下为 960 Hz）
-- FS **±4 g / ±2000 dps**，**BDU** + **IF_INC**
-- 灵敏度：accel **0.122 mg/LSB**，gyro **70 mdps/LSB** → 输出 **m/s²** 与 **rad/s**（VQF 所需 SI 单位）
+### LSM6DSV (SPI)
+
+- Bus: **SPI1** mode 3, soft CS **PA4**, SCK/MISO/MOSI **PA5/PA6/PA7**
+- Read protocol: address byte with **MSB=1** (`reg | 0x80`)
+- WHO_AM_I = **0x70**
+- ODR: HAODR true **1000 Hz** (`HAODR_CFG=0x01`, CTRL1/CTRL2=`0x19`)
+- FS: ±4 g / ±2000 dps
 - 宏：`LSM6DSV_ODR_HZ = 1000.0f`
+- Hot path: `lsm6dsv_read_acc_gyr` + `platform_spi_xfer` / `platform_lsm_cs` in **FLASH_ZW**
 
 ### Attitude filters (selectable)
 - **VQF** (default): vendored **[DusKing1/vqf-c](https://github.com/DusKing1/vqf-c)** — `initVqf(1/1000,1/1000,5.0)` 6DOF, no `updateMag`; runs in **ZW**
@@ -227,7 +247,7 @@ vendor/
 | DLC | 8 |
 | Data | `roll_i16`, `pitch_i16`, `yaw_i16` (millidegrees), `seq_u16` |
 
-Pins: **PA11=RX, PA12=TX**. Bitrate `#define PLATFORM_CAN_BITRATE 1000000` (APB1 72 MHz → BTR BRP=6, TS1=8, TS2=3, sample ≈75%). TX: non-blocking mailbox0; if busy after ≤2 polls, drop + `platform_can_drop_count++`. **Transceiver required.** USBD left off (SRAM share).
+Pins (CH32 Remap1): **PA11=RX, PA12=TX** (schematic AT32 CAN is PA2/PA3 — not available on CH32). Bitrate `#define PLATFORM_CAN_BITRATE 1000000` (APB1 72 MHz → BTR BRP=6, TS1=8, TS2=3, sample ≈75%). TX: non-blocking mailbox0; if busy after ≤2 polls, drop + `platform_can_drop_count++`. **Transceiver required.** USBD left off (SRAM share).
 
 ### main / 1 kHz 循环
 1. NZW：platform init → read algo flag → `fusion_boot_select` → boot log → optional `SETALGO` window  
@@ -257,7 +277,7 @@ Prefer **ELF/HEX** for programming: the `.bin` spans `0x0000`–end of image and
 
 1. 新建 **CH32V203** 工程，芯片选 **CH32V203G6U6**（或同 D6）。  
 2. 将本仓库 `User/`、`Sensors/`、`Middleware/`、`Platform/` 加入工程；用本仓库 `Startup/link.ld`（**32K ZW + 188K NZW + 4K algo_cfg / ALGO_RAM 4K + RAM 6K**）。  
-3. **可选**：从 MRS pack 加入 WCH SPL；若继续用 `Platform/` 可不链 SPL 的 I2C/USART。  
+3. **可选**：从 MRS pack 加入 WCH SPL；若继续用 `Platform/` 可不链 SPL 的 SPI/USART。  
 4. 包含路径加上 `Platform`、`Sensors/lsm6dsv`、`Middleware/vqf-c`、`Middleware/fusion`。  
 5. 编译下载；串口 **921600** 收二进制包，或仅看启动横幅文本。
 

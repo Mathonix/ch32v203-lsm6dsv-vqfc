@@ -37,8 +37,10 @@
 #define RCC_IOPAEN      (1u << 2)
 #define RCC_IOPBEN      (1u << 3)
 #define RCC_AFIOEN      (1u << 0)
-#define RCC_USART1EN    (1u << 14)
-#define RCC_I2C1EN      (1u << 21) /* APB1 */
+#define RCC_SPI1EN      (1u << 12) /* APB2 */
+#define RCC_USART1EN    (1u << 14) /* APB2 */
+#define RCC_USART2EN    (1u << 17) /* APB1 */
+#define RCC_I2C1EN      (1u << 21) /* APB1 — Mag I2C on schematic; unused here */
 
 /* ---- FLASH (AHB) — enhance read for NZW CodeFlash ---- */
 /* CTLR bits 24/22/25 from WCH ch32v20x_flash.c FLASH_Enhance_Mode /
@@ -56,7 +58,7 @@
 #define FLASH_CTLR_STRT   (1u << 6)
 #define FLASH_CTLR_LOCK   (1u << 7)
 #define FLASH_CTLR_ENHANCE_READ (1u << 24) /* FLASH_Enhance_Mode(ENABLE) */
-#define FLASH_CTLR_ENHANCE_CLK  (1u << 25) /* FLASH_Access_SYSTEM */
+#define FLASH_CTLR_ENHANCE_CLK  (1u << 25) /* FLASH_Access_Clock_Cfg */
 #define FLASH_STATR_BSY   (1u << 0)
 #define FLASH_STATR_WRPRTERR (1u << 4)
 #define FLASH_STATR_EOP   (1u << 5)
@@ -70,25 +72,31 @@
 #define GPIOB_BASE      0x40010C00u
 #define GPIO_CFGLR(b)   REG32((b) + 0x00)
 #define GPIO_CFGHR(b)   REG32((b) + 0x04)
+#define GPIO_INDR(b)    REG32((b) + 0x08)
 #define GPIO_OUTDR(b)   REG32((b) + 0x0C)
 #define GPIO_BSHR(b)    REG32((b) + 0x10)
 
-/* CNF/MODE nibbles: AF push-pull 50MHz=0b1011, AF OD 50MHz=0b1111 */
+/* CNF/MODE nibbles: AF push-pull 50MHz=0b1011, Out PP 50MHz=0b0011, AF OD 50MHz=0b1111 */
+#define GPIO_MODE_OUT_PP_50 0x3u
 #define GPIO_MODE_AF_PP_50  0xBu
 #define GPIO_MODE_AF_OD_50  0xFu
+#define GPIO_MODE_IN_FLOAT  0x4u
 #define GPIO_MODE_IN_PU     0x8u
 
 /* ---- AFIO ---- */
 #define AFIO_BASE       0x40010000u
 #define AFIO_PCFR1      REG32(AFIO_BASE + 0x04)
 #define AFIO_I2C1_REMAP (1u << 1) /* 0: PB6/PB7, 1: PB8/PB9 */
+#define AFIO_USART2_REMAP (1u << 3) /* 0: PA2/PA3, 1: PD5/PD6 */
 
-/* ---- USART1 ---- */
-#define USART1_BASE     0x40013800u
-#define USART1_STATR    REG32(USART1_BASE + 0x00)
-#define USART1_DATAR    REG32(USART1_BASE + 0x04)
-#define USART1_BRR      REG32(USART1_BASE + 0x08)
-#define USART1_CTLR1    REG32(USART1_BASE + 0x0C)
+/* ---- USART2 (APB1) — CH32 default TX=PA2 RX=PA3 ---- */
+#define USART2_BASE     0x40004400u
+#define USART2_STATR    REG32(USART2_BASE + 0x00)
+#define USART2_DATAR    REG32(USART2_BASE + 0x04)
+#define USART2_BRR      REG32(USART2_BASE + 0x08)
+#define USART2_CTLR1    REG32(USART2_BASE + 0x0C)
+
+/* Shared USART bit defs (USART1/2 compatible layout) */
 #define USART_TC        (1u << 6)
 #define USART_RXNE      (1u << 5)
 #define USART_TXE       (1u << 7)
@@ -96,30 +104,28 @@
 #define USART_TE        (1u << 3)
 #define USART_RE        (1u << 2)
 
-/* ---- I2C1 ---- */
-#define I2C1_BASE       0x40005400u
-#define I2C1_CTLR1      REG16(I2C1_BASE + 0x00)
-#define I2C1_CTLR2      REG16(I2C1_BASE + 0x04)
-#define I2C1_OADDR1     REG16(I2C1_BASE + 0x08)
-#define I2C1_DATAR      REG16(I2C1_BASE + 0x10)
-#define I2C1_STAR1      REG16(I2C1_BASE + 0x14)
-#define I2C1_STAR2      REG16(I2C1_BASE + 0x18)
-#define I2C1_CKCFGR     REG16(I2C1_BASE + 0x1C)
+/* Alias used by hot-path UART TX (USART2 on this board map) */
+#define PLATFORM_USART_STATR USART2_STATR
+#define PLATFORM_USART_DATAR USART2_DATAR
 
-#define I2C_CTLR1_PE    (1u << 0)
-#define I2C_CTLR1_START (1u << 8)
-#define I2C_CTLR1_STOP  (1u << 9)
-#define I2C_CTLR1_ACK   (1u << 10)
-#define I2C_CTLR1_SWRST (1u << 15)
+/* ---- SPI1 (APB2) — PA5 SCK / PA6 MISO / PA7 MOSI; software CS on PA4 ---- */
+#define SPI1_BASE       0x40013000u
+#define SPI1_CTLR1      REG16(SPI1_BASE + 0x00)
+#define SPI1_CTLR2      REG16(SPI1_BASE + 0x04)
+#define SPI1_STATR      REG16(SPI1_BASE + 0x08)
+#define SPI1_DATAR      REG16(SPI1_BASE + 0x0C)
 
-#define I2C_STAR1_SB    (1u << 0)
-#define I2C_STAR1_ADDR  (1u << 1)
-#define I2C_STAR1_BTF   (1u << 2)
-#define I2C_STAR1_STOPF (1u << 4)
-#define I2C_STAR1_RXNE  (1u << 6)
-#define I2C_STAR1_TXE   (1u << 7)
-#define I2C_STAR1_AF    (1u << 10)
-#define I2C_STAR2_BUSY  (1u << 1)
+#define SPI_CTLR1_CPHA     (1u << 0)
+#define SPI_CTLR1_CPOL     (1u << 1)
+#define SPI_CTLR1_MSTR     (1u << 2)
+#define SPI_CTLR1_BR_DIV8  (0x2u << 3) /* PCLK2/8 — 144/8=18 MHz @ APB2=SYSCLK */
+#define SPI_CTLR1_SPE      (1u << 6)
+#define SPI_CTLR1_SSI      (1u << 8)
+#define SPI_CTLR1_SSM      (1u << 9)
+
+#define SPI_STATR_RXNE  (1u << 0)
+#define SPI_STATR_TXE   (1u << 1)
+#define SPI_STATR_BSY   (1u << 7)
 
 /* ---- SysTick (Qingke) ---- */
 #define STK_BASE        0xE000F000u
@@ -168,7 +174,16 @@
 #define CAN_TXMIR_TXRQ  (1u << 0)
 #define CAN_FCTLR_FINIT (1u << 0)
 
-/* AFIO PCFR1 CAN remap: 00 = PA11 RX / PA12 TX */
+/*
+ * AFIO PCFR1 CAN_REMAP[1:0] (bits 14:13):
+ *   00 = Remap1: CAN_RX=PA11, CAN_TX=PA12
+ *   10 = Remap2: CAN_RX=PB8,  CAN_TX=PB9
+ *   11 = Remap3: CAN_RX=PD0,  CAN_TX=PD1
+ * CH32V203 has NO AF mapping of CAN onto PA2/PA3 (schematic AT32 nets).
+ */
 #define AFIO_CAN_REMAP_MASK (3u << 13)
+#define AFIO_CAN_REMAP1     (0u << 13) /* PA11/PA12 */
+#define AFIO_CAN_REMAP2     (2u << 13) /* PB8/PB9 */
+#define AFIO_CAN_REMAP3     (3u << 13) /* PD0/PD1 */
 
 #endif /* CH32V203_REGS_H */

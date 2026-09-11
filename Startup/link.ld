@@ -114,7 +114,9 @@ SECTIONS
     */*/*/vqf.o(.text .text.*)
 
     *(.text.lsm6dsv_read*)
-    *(.text.platform_i2c*)
+    *(.text.platform_spi*)
+    *(.text.platform_lsm_cs*)
+    *(.text.spi_*)
     *(.text.platform_millis*)
     *(.text.platform_delay*)
     *(.text.platform_uart_write_bytes*)
@@ -181,6 +183,24 @@ SECTIONS
     *libm.a:*rem_pio2*(.text*)
     *libm.a:*k_sin*(.text*)
     *libm.a:*k_cos*(.text*)
+
+    /* newlib-nano (riscv-none-elf --specs=nano.specs) — selective hot math */
+    *libm_nano.a:*sqrt*(.text*)
+    *libm_nano.a:*acos*(.text*)
+    *libm_nano.a:*asin*(.text*)
+    *libm_nano.a:*atan2*(.text*)
+    *libm_nano.a:*atan*(.text*)
+    *libm_nano.a:*sin*(.text*)
+    *libm_nano.a:*cos*(.text*)
+    *libm_nano.a:*fabs*(.text*)
+    *libm_nano.a:*nan*(.text*)
+    *libm_nano.a:*rem_pio2*(.text*)
+    *libm_nano.a:*k_sin*(.text*)
+    *libm_nano.a:*k_cos*(.text*)
+    *libm_nano.a:*kf_sin*(.text*)
+    *libm_nano.a:*kf_cos*(.text*)
+    *libc_nano.a:*memset*(.text*)
+    *libc_nano.a:*memcpy*(.text*)
 
     . = ALIGN(4);
   } >FLASH AT>FLASH

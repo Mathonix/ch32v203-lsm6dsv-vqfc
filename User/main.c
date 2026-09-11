@@ -1,8 +1,14 @@
 /**
  * CH32V203G6U6 + LSM6DSV + multi-algo fusion demo
- * - I2C1: PB6=SCL, PB7=SDA, LSM6DSV @ 0x6A (SA0=GND)
- * - USART1: PA9=TX @ 921600 binary Euler @ 1 kHz (+ boot banner via printf)
- * - CAN1: PA11=RX, PA12=TX @ 1 Mbit, std ID 0x321, Euler millideg @ 1 kHz
+ *
+ * Schematic board MCU is AT32F423KCU7-4; this firmware targets CH32V203 with
+ * matching net names where AF coincides (SPI). See README pin table.
+ * - SPI1: PA4=LSM_CS (SW), PA5=SCK, PA6=MISO, PA7=MOSI — mode 3, WHO_AM_I=0x70
+ * - PB0=LSM_INT1, PB1=LSM_INT2 (inputs, unused)
+ * - USART2: PA2=TX, PA3=RX @ 921600 binary Euler @ 1 kHz (+ boot printf)
+ *   (Schematic UART nets are PA0/PA1 on AT32; CH32 has no USART data AF there)
+ * - CAN1 Remap1: PA11=RX, PA12=TX @ 1 Mbit, std ID 0x321
+ *   (Schematic CAN nets are PA2/PA3 on AT32; CH32 cannot remap CAN there)
  * - Default algo: VQF from zero-wait Flash (not copied to SRAM)
  * - Alternates (Mahony / complementary): NZW LMA → ALGO_RAM, execute from SRAM
  *
@@ -183,10 +189,12 @@ FLASH_NZW static void fusion_poll_setalgo_window(uint32_t wait_ms)
 FLASH_NZW int main(void)
 {
     platform_init();
-    platform_uart_printf("\nCH32V203 + LSM6DSV + multi-algo fusion (6DOF, 1 kHz)\n");
-    platform_uart_printf("I2C1 PB6/PB7, USART1 PA9 @ %u baud binary Euler\n",
+    platform_uart_printf("\nCH32V203 + LSM6DSV SPI + multi-algo fusion (6DOF, 1 kHz)\n");
+    platform_uart_printf("Schematic MCU=AT32F423; this FW=CH32V203 (SPI nets match; UART/CAN AF differ)\n");
+    platform_uart_printf("SPI1 PA4=CS PA5=SCK PA6=MISO PA7=MOSI mode3; INT1/2=PB0/PB1 unused\n");
+    platform_uart_printf("USART2 PA2=TX PA3=RX @ %u (RM: no USART data AF on schematic PA0/PA1)\n",
                          (unsigned)PLATFORM_UART_BAUD);
-    platform_uart_printf("CAN1 PA11/PA12 @ %u bit/s, std ID 0x%03X\n",
+    platform_uart_printf("CAN1 Remap1 PA11/PA12 @ %u ID 0x%03X (RM: no CAN AF on schematic PA2/PA3)\n",
                          (unsigned)PLATFORM_CAN_BITRATE, (unsigned)PLATFORM_CAN_STD_ID);
 
     algo_cfg_t cfg;
@@ -209,7 +217,7 @@ FLASH_NZW int main(void)
     platform_uart_printf("Active after window: %s\n", fusion_algo_name(fusion_active_id));
 
     lsm6dsv_t imu;
-    int rc = lsm6dsv_init(&imu, LSM6DSV_I2C_ADDR_SA0_L);
+    int rc = lsm6dsv_init(&imu);
     if (rc == -100) {
         uint8_t who = 0;
         (void)lsm6dsv_whoami(&imu, &who);
@@ -223,7 +231,7 @@ FLASH_NZW int main(void)
         while (1) {
         }
     }
-    platform_uart_printf("LSM6DSV OK (WHO_AM_I=0x%02X, ODR=%.0f Hz HAODR)\n",
+    platform_uart_printf("LSM6DSV SPI OK (WHO_AM_I=0x%02X, ODR=%.0f Hz HAODR)\n",
                          LSM6DSV_WHO_AM_I_VALUE, (double)LSM6DSV_ODR_HZ);
 
     fusion_active->init(LSM6DSV_ODR_HZ);

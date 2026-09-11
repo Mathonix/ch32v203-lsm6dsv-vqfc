@@ -1,5 +1,16 @@
 /**
- * CH32V203 platform: HSI+PLL clock, USART1 debug, I2C1 on PB6/PB7.
+ * CH32V203 platform: HSI+PLL clock, USART2, SPI1 for LSM6DSV, CAN1.
+ *
+ * Schematic board MCU is AT32F423KCU7-4; this FW targets CH32V203.
+ *   LSM SPI PA4–PA7: exact net/AF match (SPI1 + soft CS).
+ *   UART schematic nets PA0/PA1: CH32 RM maps only USART2 CTS/RTS there —
+ *     no USART TX/RX AF. Firmware uses USART2 data pins PA2=TX / PA3=RX
+ *     (CH32 default, no remap). Keep 921600 binary + boot printf.
+ *   CAN schematic nets PA2/PA3: CH32 CAN remaps are PA11/12, PB8/9, PD0/1
+ *     only — no PA2/PA3. Firmware uses Remap1 PA11/PA12 (USBD off).
+ *     Note: USART2 also claims PA2/PA3 on CH32, so schematic CAN nets and
+ *     CH32 USART2 pins coincide; choose USART2 for UART, CAN on Remap1.
+ *   LSM_INT1/INT2 PB0/PB1: inputs, unused. Mag I2C PB6/PB7: out of scope.
  */
 #include "platform.h"
 #include "ch32v203_regs.h"
@@ -12,7 +23,6 @@
 uint32_t SystemCoreClock = HSI_VALUE;
 volatile uint32_t platform_can_drop_count = 0u;
 
-/* Weak SystemInit called from startup before main. */
 void SystemInit(void);
 
 static void gpio_set_mode_low(uint32_t gpiobase, unsigned pin, uint32_t mode_nibble)
@@ -39,8 +49,6 @@ void SystemInit(void)
      * Enable FLASH enhance read mode BEFORE any code in FLASH_NZW runs.
      * Source: WCH EVT ch32v20x_flash.c FLASH_Enhance_Mode(ENABLE) sets
      * FLASH->CTLR bit 24. Unlock first (same keys as programming unlock).
-     * Without this, execute/fetch from non-zero-wait CodeFlash may be unreliable.
-     * See also FLASH_Access_Clock_Cfg; we leave enhance clock at reset default.
      */
     if ((FLASH_CTLR & FLASH_CTLR_LOCK) != 0u) {
         FLASH_KEYR = FLASH_KEY1;
@@ -49,7 +57,7 @@ void SystemInit(void)
     FLASH_CTLR |= FLASH_CTLR_ENHANCE_READ;
     FLASH_CTLR |= FLASH_CTLR_LOCK;
 
-    /* Prefer HSI * 18 = 144 MHz (CH32 EXTEN HSIPRE path, common bare-metal demo). */
+    /* Prefer HSI * 18 = 144 MHz (CH32 EXTEN HSIPRE path). */
     RCC_CTLR |= RCC_HSION;
     while ((RCC_CTLR & RCC_HSIRDY) == 0u) {
     }
@@ -61,8 +69,6 @@ void SystemInit(void)
     RCC_CFGR0 |= RCC_PPRE1_DIV2;         /* APB1 = SYSCLK/2 = 72 MHz */
     RCC_CFGR0 &= ~(0xFu << 18);
     RCC_CFGR0 |= RCC_PLL_MUL18;          /* PLL = HSI * 18 */
-    /* PLLSRC=0: HSI/2 as PLL input on classic STM32; on CH32 with HSIPRE,
-       mtkos path uses MUL18 without PLLSRC for 144 MHz from HSI. */
 
     RCC_CTLR |= RCC_PLLON;
     while ((RCC_CTLR & RCC_PLLRDY) == 0u) {
@@ -77,7 +83,6 @@ void SystemInit(void)
 
 static uint64_t systick_count64(void)
 {
-    /* Qingke SysTick: read CNTH then CNTL carefully for tear */
     uint32_t hi1, lo, hi2;
     do {
         hi1 = STK_CNTH;
@@ -89,7 +94,6 @@ static uint64_t systick_count64(void)
 
 static void systick_init(void)
 {
-    /* Free-running up-counter @ HCLK, no interrupt — poll for timebase. */
     STK_CTLR = 0u;
     STK_CNTL = 0u;
     STK_CNTH = 0u;
@@ -112,29 +116,34 @@ void platform_delay_ms(uint32_t ms)
     }
 }
 
-FLASH_NZW static void usart1_init(uint32_t baud)
+/* ---- USART2 @ PA2 TX / PA3 RX (CH32 RM; schematic UART nets are PA0/PA1 on AT32) ---- */
+
+FLASH_NZW static void usart2_init(uint32_t baud)
 {
-    RCC_APB2PCENR |= RCC_IOPAEN | RCC_USART1EN | RCC_AFIOEN;
+    RCC_APB2PCENR |= RCC_IOPAEN | RCC_AFIOEN;
+    RCC_APB1PCENR |= RCC_USART2EN;
 
-    /* PA9 = USART1_TX AF PP 50MHz; PA10 = RX input pull-up */
-    gpio_set_mode_high(GPIOA_BASE, 9u, GPIO_MODE_AF_PP_50);
-    gpio_set_mode_high(GPIOA_BASE, 10u, GPIO_MODE_IN_PU);
-    GPIO_OUTDR(GPIOA_BASE) |= (1u << 10);
+    /* No USART2 remap → PA2=TX, PA3=RX (PA0/PA1 are CTS/RTS only on CH32) */
+    AFIO_PCFR1 &= ~AFIO_USART2_REMAP;
 
-    /* BRR for 16x oversampling: PCLK2 = SYSCLK (APB2 div1 default) */
-    uint32_t pclk = SystemCoreClock;
-    USART1_BRR = (pclk + baud / 2u) / baud;
-    USART1_CTLR1 = USART_TE | USART_RE | USART_UE;
+    gpio_set_mode_low(GPIOA_BASE, 2u, GPIO_MODE_AF_PP_50);
+    gpio_set_mode_low(GPIOA_BASE, 3u, GPIO_MODE_IN_PU);
+    GPIO_OUTDR(GPIOA_BASE) |= (1u << 3);
+
+    /* BRR: PCLK1 = SYSCLK/2 = 72 MHz */
+    uint32_t pclk1 = SystemCoreClock / 2u;
+    USART2_BRR = (pclk1 + baud / 2u) / baud;
+    USART2_CTLR1 = USART_TE | USART_RE | USART_UE;
 }
 
-static void usart1_putc(char c)
+static void usart2_putc(char c)
 {
     if (c == '\n') {
-        usart1_putc('\r');
+        usart2_putc('\r');
     }
-    while ((USART1_STATR & USART_TXE) == 0u) {
+    while ((USART2_STATR & USART_TXE) == 0u) {
     }
-    USART1_DATAR = (uint16_t)(uint8_t)c;
+    USART2_DATAR = (uint16_t)(uint8_t)c;
 }
 
 void platform_uart_write(const char *s)
@@ -143,16 +152,16 @@ void platform_uart_write(const char *s)
         return;
     }
     while (*s) {
-        usart1_putc(*s++);
+        usart2_putc(*s++);
     }
 }
 
 FLASH_NZW int platform_uart_getc_nonblock(void)
 {
-    if ((USART1_STATR & USART_RXNE) == 0u) {
+    if ((USART2_STATR & USART_RXNE) == 0u) {
         return -1;
     }
-    return (int)(uint8_t)USART1_DATAR;
+    return (int)(uint8_t)USART2_DATAR;
 }
 
 FLASH_NZW void platform_uart_printf(const char *fmt, ...)
@@ -165,145 +174,69 @@ FLASH_NZW void platform_uart_printf(const char *fmt, ...)
     platform_uart_write(buf);
 }
 
-static int i2c_wait_flag(volatile uint16_t *reg, uint16_t mask, int set, uint32_t timeout)
+/* ---- SPI1 + soft CS (LSM6DSV) — mode 3, ZW hot path ---- */
+
+FLASH_ZW void platform_lsm_cs(int assert_low)
 {
-    while (timeout--) {
-        uint16_t v = *reg;
-        if (set) {
-            if ((v & mask) != 0u) {
-                return 0;
+    if (assert_low) {
+        GPIO_BSHR(GPIOA_BASE) = (1u << (4u + 16u)); /* BR4: clear PA4 */
+    } else {
+        GPIO_BSHR(GPIOA_BASE) = (1u << 4u); /* BS4: set PA4 */
+    }
+}
+
+FLASH_ZW int platform_spi_xfer(const uint8_t *tx, uint8_t *rx, uint16_t len)
+{
+    for (uint16_t i = 0; i < len; i++) {
+        uint8_t out = tx ? tx[i] : 0xFFu;
+        uint32_t guard = 100000u;
+        while ((SPI1_STATR & SPI_STATR_TXE) == 0u) {
+            if (--guard == 0u) {
+                return -1;
             }
-        } else if ((v & mask) == 0u) {
-            return 0;
+        }
+        SPI1_DATAR = out;
+        guard = 100000u;
+        while ((SPI1_STATR & SPI_STATR_RXNE) == 0u) {
+            if (--guard == 0u) {
+                return -2;
+            }
+        }
+        uint8_t in = (uint8_t)SPI1_DATAR;
+        if (rx) {
+            rx[i] = in;
         }
     }
-    return -1;
-}
-
-FLASH_NZW static void i2c1_init(void)
-{
-    RCC_APB2PCENR |= RCC_IOPBEN | RCC_AFIOEN;
-    RCC_APB1PCENR |= RCC_I2C1EN;
-
-    /* Default map: I2C1 SCL=PB6, SDA=PB7 (clear remap bit). */
-    AFIO_PCFR1 &= ~AFIO_I2C1_REMAP;
-
-    gpio_set_mode_low(GPIOB_BASE, 6u, GPIO_MODE_AF_OD_50);
-    gpio_set_mode_low(GPIOB_BASE, 7u, GPIO_MODE_AF_OD_50);
-
-    /* Software reset I2C */
-    I2C1_CTLR1 |= I2C_CTLR1_SWRST;
-    I2C1_CTLR1 &= (uint16_t)~I2C_CTLR1_SWRST;
-
-    /* FREQ = PCLK1 MHz; PCLK1 = 72 MHz */
-    uint32_t pclk1 = SystemCoreClock / 2u;
-    uint16_t freq_mhz = (uint16_t)(pclk1 / 1000000u);
-    I2C1_CTLR2 = freq_mhz & 0x3Fu;
-
-    /* 100 kHz standard mode: CCR = PCLK1 / (2 * 100k) */
-    uint16_t ccr = (uint16_t)(pclk1 / (100000u * 2u));
-    if (ccr < 4u) {
-        ccr = 4u;
-    }
-    I2C1_CKCFGR = ccr;
-
-    I2C1_CTLR1 |= I2C_CTLR1_PE;
-}
-
-static int i2c_start_addr(uint8_t addr7, int read)
-{
-    if (i2c_wait_flag(&I2C1_STAR2, I2C_STAR2_BUSY, 0, 100000u) != 0) {
-        I2C1_CTLR1 |= I2C_CTLR1_STOP;
-        return -1;
-    }
-    I2C1_CTLR1 |= I2C_CTLR1_START;
-    if (i2c_wait_flag(&I2C1_STAR1, I2C_STAR1_SB, 1, 100000u) != 0) {
-        return -2;
-    }
-    I2C1_DATAR = (uint16_t)((addr7 << 1) | (read ? 1u : 0u));
-    if (i2c_wait_flag(&I2C1_STAR1, I2C_STAR1_ADDR, 1, 100000u) != 0) {
-        I2C1_CTLR1 |= I2C_CTLR1_STOP;
-        return -3;
-    }
-    (void)I2C1_STAR2; /* clear ADDR */
     return 0;
 }
 
-int platform_i2c_write(uint8_t addr7, uint8_t reg, const uint8_t *data, uint16_t len)
+FLASH_NZW static void spi1_init(void)
 {
-    if (i2c_start_addr(addr7, 0) != 0) {
-        return -1;
-    }
-    I2C1_DATAR = reg;
-    if (i2c_wait_flag(&I2C1_STAR1, I2C_STAR1_TXE, 1, 100000u) != 0) {
-        I2C1_CTLR1 |= I2C_CTLR1_STOP;
-        return -2;
-    }
-    for (uint16_t i = 0; i < len; i++) {
-        I2C1_DATAR = data[i];
-        if (i2c_wait_flag(&I2C1_STAR1, I2C_STAR1_TXE, 1, 100000u) != 0) {
-            I2C1_CTLR1 |= I2C_CTLR1_STOP;
-            return -3;
-        }
-    }
-    if (i2c_wait_flag(&I2C1_STAR1, I2C_STAR1_BTF, 1, 100000u) != 0) {
-        I2C1_CTLR1 |= I2C_CTLR1_STOP;
-        return -4;
-    }
-    I2C1_CTLR1 |= I2C_CTLR1_STOP;
-    return 0;
-}
+    RCC_APB2PCENR |= RCC_IOPAEN | RCC_IOPBEN | RCC_SPI1EN | RCC_AFIOEN;
 
-int platform_i2c_read(uint8_t addr7, uint8_t reg, uint8_t *data, uint16_t len)
-{
-    if (len == 0u || data == NULL) {
-        return -1;
-    }
-    if (i2c_start_addr(addr7, 0) != 0) {
-        return -1;
-    }
-    I2C1_DATAR = reg;
-    if (i2c_wait_flag(&I2C1_STAR1, I2C_STAR1_TXE, 1, 100000u) != 0) {
-        I2C1_CTLR1 |= I2C_CTLR1_STOP;
-        return -2;
-    }
+    /* PA4 = LSM_CS: GPIO PP, idle high (active low) */
+    gpio_set_mode_low(GPIOA_BASE, 4u, GPIO_MODE_OUT_PP_50);
+    platform_lsm_cs(0);
 
-    I2C1_CTLR1 |= I2C_CTLR1_START;
-    if (i2c_wait_flag(&I2C1_STAR1, I2C_STAR1_SB, 1, 100000u) != 0) {
-        return -3;
-    }
-    I2C1_DATAR = (uint16_t)((addr7 << 1) | 1u);
-    if (i2c_wait_flag(&I2C1_STAR1, I2C_STAR1_ADDR, 1, 100000u) != 0) {
-        I2C1_CTLR1 |= I2C_CTLR1_STOP;
-        return -4;
-    }
+    /* PA5=SCK, PA6=MISO, PA7=MOSI — SPI1 default AF (no SPI1 remap) */
+    gpio_set_mode_low(GPIOA_BASE, 5u, GPIO_MODE_AF_PP_50);
+    gpio_set_mode_low(GPIOA_BASE, 6u, GPIO_MODE_IN_PU); /* MISO input w/ pull-up */
+    GPIO_OUTDR(GPIOA_BASE) |= (1u << 6);
+    gpio_set_mode_low(GPIOA_BASE, 7u, GPIO_MODE_AF_PP_50);
 
-    if (len == 1u) {
-        I2C1_CTLR1 &= (uint16_t)~I2C_CTLR1_ACK;
-        (void)I2C1_STAR2;
-        I2C1_CTLR1 |= I2C_CTLR1_STOP;
-        if (i2c_wait_flag(&I2C1_STAR1, I2C_STAR1_RXNE, 1, 100000u) != 0) {
-            return -5;
-        }
-        data[0] = (uint8_t)I2C1_DATAR;
-        I2C1_CTLR1 |= I2C_CTLR1_ACK;
-        return 0;
-    }
+    /* PB0=LSM_INT1, PB1=LSM_INT2 — floating inputs, unused */
+    gpio_set_mode_low(GPIOB_BASE, 0u, GPIO_MODE_IN_FLOAT);
+    gpio_set_mode_low(GPIOB_BASE, 1u, GPIO_MODE_IN_FLOAT);
 
-    I2C1_CTLR1 |= I2C_CTLR1_ACK;
-    (void)I2C1_STAR2;
-    for (uint16_t i = 0; i < len; i++) {
-        if (i == (uint16_t)(len - 1u)) {
-            I2C1_CTLR1 &= (uint16_t)~I2C_CTLR1_ACK;
-            I2C1_CTLR1 |= I2C_CTLR1_STOP;
-        }
-        if (i2c_wait_flag(&I2C1_STAR1, I2C_STAR1_RXNE, 1, 100000u) != 0) {
-            return -6;
-        }
-        data[i] = (uint8_t)I2C1_DATAR;
-    }
-    I2C1_CTLR1 |= I2C_CTLR1_ACK;
-    return 0;
+    /*
+     * SPI mode 3 (CPOL=1 CPHA=1): idle clock high, sample on trailing edge.
+     * LSM6DSV datasheet: compatible with SPI modes 0 and 3.
+     * Master, SSM/SSI soft NSS, BR = /8 → 18 MHz @ 144 MHz PCLK2.
+     */
+    SPI1_CTLR1 = 0u;
+    SPI1_CTLR1 = (uint16_t)(SPI_CTLR1_MSTR | SPI_CTLR1_SSM | SPI_CTLR1_SSI |
+                            SPI_CTLR1_CPOL | SPI_CTLR1_CPHA | SPI_CTLR1_BR_DIV8);
+    SPI1_CTLR1 |= SPI_CTLR1_SPE;
 }
 
 /* ---- UART binary TX (ZW hot path) ---- */
@@ -314,9 +247,9 @@ FLASH_ZW void platform_uart_write_bytes(const uint8_t *p, unsigned n)
         return;
     }
     for (unsigned i = 0; i < n; i++) {
-        while ((USART1_STATR & USART_TXE) == 0u) {
+        while ((USART2_STATR & USART_TXE) == 0u) {
         }
-        USART1_DATAR = (uint16_t)p[i];
+        USART2_DATAR = (uint16_t)p[i];
     }
 }
 
@@ -361,23 +294,24 @@ FLASH_ZW unsigned platform_uart_send_euler_bin(uint16_t seq, float roll_deg,
 FLASH_NZW static void can1_init(void)
 {
     /*
-     * Default pins: PA11=CAN_RX (in pull-up), PA12=CAN_TX (AF PP).
-     * Remap cleared → Remap1. USBD left off (shares 512B SRAM with CAN).
+     * Schematic CAN_RX/TX = PA2/PA3 (AT32 CAN2 MUX9).
+     * CH32V203 CAN1 remaps (AFIO_PCFR1 CAN_REMAP[1:0]):
+     *   Remap1 00 → PA11 RX / PA12 TX
+     *   Remap2 10 → PB8 RX / PB9 TX
+     *   Remap3 11 → PD0 RX / PD1 TX
+     * No PA2/PA3 CAN AF. Use Remap1; USBD left off (shares 512B SRAM).
      *
-     * Bitrate: APB1 = SystemCoreClock/2 = 72 MHz.
-     * BTR: BRP=6, TS1=8, TS2=3 → 72e6/(6*(1+8+3))=1 Mbit, sample ≈ 75%.
-     * Register fields store (value - 1).
+     * Bitrate: APB1 = 72 MHz → BRP=6, TS1=8, TS2=3 → 1 Mbit, sample ≈ 75%.
      */
     RCC_APB2PCENR |= RCC_IOPAEN | RCC_AFIOEN;
     RCC_APB1PCENR |= RCC_CAN1EN;
 
-    AFIO_PCFR1 &= ~AFIO_CAN_REMAP_MASK; /* PA11/PA12 */
+    AFIO_PCFR1 = (AFIO_PCFR1 & ~AFIO_CAN_REMAP_MASK) | AFIO_CAN_REMAP1;
 
     gpio_set_mode_high(GPIOA_BASE, 11u, GPIO_MODE_IN_PU);
     GPIO_OUTDR(GPIOA_BASE) |= (1u << 11);
     gpio_set_mode_high(GPIOA_BASE, 12u, GPIO_MODE_AF_PP_50);
 
-    /* Exit sleep, enter init */
     CAN1_CTLR &= ~CAN_CTLR_SLEEP;
     {
         uint32_t t = 100000u;
@@ -391,27 +325,23 @@ FLASH_NZW static void can1_init(void)
         }
     }
 
-    /* ABOM + NART (no auto-retransmit — drop on bus error rather than stall) */
     CAN1_CTLR |= CAN_CTLR_ABOM | CAN_CTLR_NART;
 
 #if PLATFORM_CAN_BITRATE == 1000000u
-    /* BRP=6→5, TS1=8→7, TS2=3→2, SJW=1→0 */
     CAN1_BTIMR = (0u << 24) | (2u << 20) | (7u << 16) | 5u;
 #else
 #error "Only PLATFORM_CAN_BITRATE 1000000 supported in this build; adjust BTIMR"
 #endif
 
-    /* Filters: accept-all (TX-only still needs FINIT leave for clean leave-init) */
     CAN1_FCTLR |= CAN_FCTLR_FINIT;
-    CAN1_FMCFGR &= ~1u;          /* mask mode filter 0 */
-    CAN1_FSCFGR |= 1u;           /* 32-bit scale */
-    CAN1_FAFIFOR &= ~1u;         /* FIFO0 */
+    CAN1_FMCFGR &= ~1u;
+    CAN1_FSCFGR |= 1u;
+    CAN1_FAFIFOR &= ~1u;
     CAN1_F0R1 = 0u;
-    CAN1_F0R2 = 0u;              /* mask 0 = accept all */
-    CAN1_FWR |= 1u;              /* activate filter 0 */
+    CAN1_F0R2 = 0u;
+    CAN1_FWR |= 1u;
     CAN1_FCTLR &= ~CAN_FCTLR_FINIT;
 
-    /* Leave init mode */
     CAN1_CTLR &= ~CAN_CTLR_INRQ;
     {
         uint32_t t = 100000u;
@@ -434,7 +364,6 @@ FLASH_ZW static int16_t millideg_i16(float deg)
 FLASH_ZW int platform_can_send_euler(uint16_t seq, float roll_deg, float pitch_deg,
                                      float yaw_deg)
 {
-    /* Brief poll only — never spin forever on the 1 kHz path */
     unsigned spins = 2u;
     while ((CAN1_TSTATR & CAN_TSTATR_TME0) == 0u) {
         if (spins == 0u) {
@@ -448,10 +377,8 @@ FLASH_ZW int platform_can_send_euler(uint16_t seq, float roll_deg, float pitch_d
     int16_t p = millideg_i16(pitch_deg);
     int16_t y = millideg_i16(yaw_deg);
 
-    /* Std ID in STID[10:0] at bits 31:21; IDE=RTR=0; TXRQ set last via OR */
     uint32_t id = ((uint32_t)(PLATFORM_CAN_STD_ID & 0x7FFu) << 21);
-    CAN1_TXMDTR0 = 8u; /* DLC=8 */
-    /* LE: roll_i16, pitch_i16 | yaw_i16, seq_u16 */
+    CAN1_TXMDTR0 = 8u;
     CAN1_TXMDLR0 = ((uint32_t)(uint16_t)r) |
                    ((uint32_t)(uint16_t)p << 16);
     CAN1_TXMDHR0 = ((uint32_t)(uint16_t)y) |
@@ -462,12 +389,11 @@ FLASH_ZW int platform_can_send_euler(uint16_t seq, float roll_deg, float pitch_d
 
 FLASH_NZW void platform_init(void)
 {
-    /* SystemInit already ran from reset; re-assert clock var. */
     if (SystemCoreClock < 1000000u) {
         SystemInit();
     }
     systick_init();
-    usart1_init(PLATFORM_UART_BAUD);
-    i2c1_init();
+    usart2_init(PLATFORM_UART_BAUD);
+    spi1_init();
     can1_init();
 }

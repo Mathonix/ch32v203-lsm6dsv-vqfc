@@ -1,6 +1,7 @@
 #include "lsm6dsv.h"
 #include "platform.h"
 #include "flash_nzw.h"
+#include "flash_zw.h"
 
 /* Register map (ST lsm6dsv-pid / DS13476) */
 #define REG_WHO_AM_I   0x0Fu
@@ -37,32 +38,45 @@
 #define G_TO_MPS2          9.80665f
 #define DEG2RAD            0.017453292519943295f
 
-static int wr(lsm6dsv_t *dev, uint8_t reg, uint8_t val)
+/* SPI: write addr MSB=0; read addr MSB=1 (OR 0x80). Mode 3 via platform SPI1. */
+
+FLASH_ZW static int spi_write_reg(uint8_t reg, uint8_t val)
 {
-    return platform_i2c_write(dev->addr7, reg, &val, 1);
+    uint8_t tx[2] = { (uint8_t)(reg & 0x7Fu), val };
+    platform_lsm_cs(1);
+    int rc = platform_spi_xfer(tx, 0, 2);
+    platform_lsm_cs(0);
+    return rc;
 }
 
-static int rd(lsm6dsv_t *dev, uint8_t reg, uint8_t *buf, uint16_t n)
+FLASH_ZW static int spi_read_regs(uint8_t reg, uint8_t *buf, uint16_t n)
 {
-    return platform_i2c_read(dev->addr7, reg, buf, n);
+    uint8_t addr = (uint8_t)(reg | 0x80u);
+    platform_lsm_cs(1);
+    int rc = platform_spi_xfer(&addr, 0, 1);
+    if (rc == 0) {
+        rc = platform_spi_xfer(0, buf, n);
+    }
+    platform_lsm_cs(0);
+    return rc;
 }
 
 static int soft_reset(lsm6dsv_t *dev)
 {
-    /* Datasheet / ST PID: power-down XL+G, set SW_RESET, poll until clear. */
-    if (wr(dev, REG_CTRL1, 0x00) != 0) {
+    (void)dev;
+    if (spi_write_reg(REG_CTRL1, 0x00) != 0) {
         return -1;
     }
-    if (wr(dev, REG_CTRL2, 0x00) != 0) {
+    if (spi_write_reg(REG_CTRL2, 0x00) != 0) {
         return -2;
     }
-    if (wr(dev, REG_CTRL3, CTRL3_SW_RESET) != 0) {
+    if (spi_write_reg(REG_CTRL3, CTRL3_SW_RESET) != 0) {
         return -3;
     }
     for (int i = 0; i < 20; i++) {
         uint8_t c3 = 0xFFu;
         platform_delay_ms(1);
-        if (rd(dev, REG_CTRL3, &c3, 1) != 0) {
+        if (spi_read_regs(REG_CTRL3, &c3, 1) != 0) {
             return -4;
         }
         if ((c3 & CTRL3_SW_RESET) == 0u) {
@@ -77,15 +91,15 @@ int lsm6dsv_whoami(lsm6dsv_t *dev, uint8_t *id)
     if (dev == 0 || id == 0) {
         return -1;
     }
-    return rd(dev, REG_WHO_AM_I, id, 1);
+    return spi_read_regs(REG_WHO_AM_I, id, 1);
 }
 
-FLASH_NZW int lsm6dsv_init(lsm6dsv_t *dev, uint8_t addr7)
+FLASH_NZW int lsm6dsv_init(lsm6dsv_t *dev)
 {
     if (dev == 0) {
         return -1;
     }
-    dev->addr7 = addr7;
+    dev->unused = 0;
 
     platform_delay_ms(10);
 
@@ -102,23 +116,23 @@ FLASH_NZW int lsm6dsv_init(lsm6dsv_t *dev, uint8_t addr7)
         return -100;
     }
 
-    if (wr(dev, REG_CTRL3, (uint8_t)(CTRL3_BDU | CTRL3_IF_INC)) != 0) {
+    if (spi_write_reg(REG_CTRL3, (uint8_t)(CTRL3_BDU | CTRL3_IF_INC)) != 0) {
         return -12;
     }
-    if (wr(dev, REG_CTRL6, FS_G_2000DPS) != 0) {
+    if (spi_write_reg(REG_CTRL6, FS_G_2000DPS) != 0) {
         return -13;
     }
-    if (wr(dev, REG_CTRL8, FS_XL_4G) != 0) {
+    if (spi_write_reg(REG_CTRL8, FS_XL_4G) != 0) {
         return -14;
     }
     /* Select HAODR table so ODR code 0x9 is true 1000 Hz (not 960). */
-    if (wr(dev, REG_HAODR_CFG, HAODR_SEL_1000) != 0) {
+    if (spi_write_reg(REG_HAODR_CFG, HAODR_SEL_1000) != 0) {
         return -17;
     }
-    if (wr(dev, REG_CTRL1, CTRL_HAODR_1000HZ) != 0) {
+    if (spi_write_reg(REG_CTRL1, CTRL_HAODR_1000HZ) != 0) {
         return -15;
     }
-    if (wr(dev, REG_CTRL2, CTRL_HAODR_1000HZ) != 0) {
+    if (spi_write_reg(REG_CTRL2, CTRL_HAODR_1000HZ) != 0) {
         return -16;
     }
 
@@ -131,13 +145,13 @@ static int16_t le16(const uint8_t *p)
     return (int16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
 }
 
-int lsm6dsv_read_acc_gyr(lsm6dsv_t *dev, float acc_mps2[3], float gyr_rads[3])
+FLASH_ZW int lsm6dsv_read_acc_gyr(lsm6dsv_t *dev, float acc_mps2[3], float gyr_rads[3])
 {
     uint8_t raw[12];
     if (dev == 0 || acc_mps2 == 0 || gyr_rads == 0) {
         return -1;
     }
-    if (rd(dev, REG_OUTX_L_G, raw, 12) != 0) {
+    if (spi_read_regs(REG_OUTX_L_G, raw, 12) != 0) {
         return -2;
     }
 

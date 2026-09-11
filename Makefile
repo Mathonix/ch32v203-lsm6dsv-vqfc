@@ -11,12 +11,13 @@
 TARGET   ?= firmware
 BUILD    ?= build
 
-PREFIX   ?= riscv-none-elf-
+# Prefer picolibc (riscv64-unknown-elf) so libm lands in .text_zw via link.ld wildcards.
+PREFIX   ?= riscv64-unknown-elf-
 ifeq ($(shell which $(PREFIX)gcc 2>/dev/null),)
-  PREFIX := riscv-none-embed-
+  PREFIX := riscv-none-elf-
 endif
 ifeq ($(shell which $(PREFIX)gcc 2>/dev/null),)
-  PREFIX := riscv64-unknown-elf-
+  PREFIX := riscv-none-embed-
 endif
 
 SPECS := --specs=nano.specs --specs=nosys.specs

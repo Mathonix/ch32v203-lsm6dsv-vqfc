@@ -2,8 +2,8 @@
  * Place high-rate sample / VQF hot-path code into zero-wait Flash (FLASH / R0WAIT).
  *
  * Linker: Startup/link.ld maps .text.hot → .text_zw → FLASH @ < 0x8000.
- * Use for: 1 kHz IMU→VQF loop body (vqf_sample_step), and any app helpers that
- * must execute from R0WAIT alongside updateGyr / updateAcc / I2C.
+ * Use for: 1 kHz IMU→VQF loop body (fusion_sample_step), and any app helpers that
+ * must execute from R0WAIT alongside updateGyr / updateAcc / SPI.
  *
  * Cold/init/printf stay in FLASH_NZW via flash_nzw.h.
  */
