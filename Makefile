@@ -3,7 +3,7 @@
 #
 #   make            # build build/firmware.elf
 #   make flash      # optional: openocd + wch-link (adjust OPENOCD)
-#   make verify-zw  # VQF-fxp hot-path symbols in HOT_RAM (SRAM)
+#   make verify-zw  # vqf_fixed hot-path symbols in HOT_RAM (SRAM)
 #
 # Flash: G6U6 R0WAIT=32KB zero-wait + ~188KB NZW code + 4KB algo_cfg @ 0x37000
 # HOT_RAM 4KB @ 0x20000000; ALGO_RAM 4KB @ 0x20001000; RAM 2KB @ 0x20002000.
@@ -43,6 +43,7 @@ INCLUDES := \
   -ISensors/lsm6dsv \
   -IMiddleware/vqf-c \
   -IMiddleware/vqf-fxp \
+  -IMiddleware/vqf_fixed \
   -IMiddleware/fusion
 
 CFLAGS   := $(MCUFLAGS) $(DEFS) $(INCLUDES) -Os -g3 -Wall -Wextra
@@ -62,6 +63,11 @@ C_SRCS := \
   Platform/platform_ch32v203.c \
   Platform/algo_cfg.c \
   Sensors/lsm6dsv/lsm6dsv.c \
+  Middleware/vqf_fixed/vqf_fixed_math.c \
+  Middleware/vqf_fixed/vqf_fixed_quat.c \
+  Middleware/vqf_fixed/vqf_fixed_biquad.c \
+  Middleware/vqf_fixed/vqf_fixed_ldlt.c \
+  Middleware/vqf_fixed/vqf_fixed.c \
   Middleware/vqf-fxp/vqf_fxp.c \
   Middleware/fusion/fusion_vqf.c \
   Middleware/fusion/fusion_select.c \

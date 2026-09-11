@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify VQF-fxp 1 kHz hot path symbols live in HOT_RAM (SRAM @ 0x2000xxxx).
+"""Verify vqf_fixed 1 kHz hot path symbols live in HOT_RAM (SRAM @ 0x2000xxxx).
 
 Also reports ALGO_RAM placement for Mahony/Comp and that soft-float/libm are
 not in zero-wait Flash. Int64 div helpers may remain in ZW (Option B).
@@ -20,11 +20,11 @@ RAM_BASE = 0x20002000
 RAM_END = 0x20002800
 
 REQUIRED = [
-    "vqfx_update_gyr",
-    "vqfx_update_acc",
-    "vqfx_get_quat6d",
-    "vqfx_get_euler_mdeg",
-    "lsm6dsv_read_acc_gyr_fxp",
+    "vqf_fixed_update_gyr_f25",
+    "vqf_fixed_update_acc_f27",
+    "vqf_fixed_get_quat6d_f30",
+    "vqf_fixed_get_euler_mdeg",
+    "lsm6dsv_read_acc_gyr_fixed",
     "platform_spi_xfer",
     "platform_lsm_cs",
     "fusion_run_1khz",
@@ -49,11 +49,10 @@ FORBIDDEN_IN_ZW = [
 ]
 
 HOT_FUNCS = (
-    "vqfx_update_gyr",
-    "vqfx_update_acc",
-    "vqfx_get_euler_mdeg",
+    "vqf_fixed_update_gyr_f25",
+    "vqf_fixed_update_acc_f27",
     "fusion_run_1khz",
-    "lsm6dsv_read_acc_gyr_fxp",
+    "lsm6dsv_read_acc_gyr_fixed",
     "platform_uart_send_euler_i16",
     "platform_can_send_euler_i16",
 )
@@ -150,6 +149,19 @@ def main() -> int:
 
     print("=== Hot symbol addresses (must be in HOT_RAM [0x20000000, 0x20001000)) ===")
     print(f"{'symbol':<32} {'addr':>10}  zone")
+    # Updates + IMU/IO must be HOT_RAM; getters may be ZW Flash (HOT_RAM budget).
+    HOT_REQUIRED = {
+        "vqf_fixed_update_gyr_f25",
+        "vqf_fixed_update_acc_f27",
+        "lsm6dsv_read_acc_gyr_fixed",
+        "platform_spi_xfer",
+        "platform_lsm_cs",
+        "fusion_run_1khz",
+        "platform_uart_write_bytes",
+        "platform_uart_send_euler_i16",
+        "platform_can_send_euler_i16",
+        "platform_millis",
+    }
     for name in REQUIRED:
         if name not in syms:
             errors.append(f"MISSING symbol: {name}")
@@ -158,8 +170,12 @@ def main() -> int:
         addr = syms[name]
         zone = zone_of(addr)
         print(f"{name:<32} 0x{addr:08x}  {zone}")
-        if not (HOT_RAM_BASE <= addr < HOT_RAM_END):
-            errors.append(f"{name} @ 0x{addr:x} not in HOT_RAM")
+        if name in HOT_REQUIRED:
+            if not (HOT_RAM_BASE <= addr < HOT_RAM_END):
+                errors.append(f"{name} @ 0x{addr:x} not in HOT_RAM")
+        else:
+            if not (HOT_RAM_BASE <= addr < HOT_RAM_END or addr < ZW_LIMIT):
+                errors.append(f"{name} @ 0x{addr:x} not in HOT_RAM/ZW")
 
     print("\n=== Integer helpers (divdi3) — ZW OK (Option B) ===")
     for name in ("__divdi3", "__udivdi3", "__umoddi3"):
@@ -232,7 +248,7 @@ def main() -> int:
         errors.append(f"HOT_RAM overflow: {hot} > 4096")
     if algo > 4096:
         errors.append(f"ALGO_RAM overflow: {algo} > 4096")
-    if data + bss + stack > 2048:
+    if data + bss + stack > 2048:  # stack sized in link.ld (768)
         errors.append(f"RAM overflow: data+bss+stack {data+bss+stack} > 2048")
 
     dump = run(["riscv64-unknown-elf-objdump", "-d", str(elf)])
@@ -247,7 +263,7 @@ def main() -> int:
         for e in errors:
             print(" -", e)
         return 1
-    print("\nVERIFY OK: VQF-fxp hot path in HOT_RAM (SRAM); Mahony/Comp in ALGO_RAM.")
+    print("\nVERIFY OK: vqf_fixed updates in HOT_RAM; getters/helpers ZW OK; Mahony/Comp in ALGO_RAM.")
     return 0
 
 

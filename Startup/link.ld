@@ -12,14 +12,14 @@
  *   ALGO_CFG (4K @ 0x37000): persistent algo select flag (NOLOAD)
  *   HOT_RAM (4K @ 0x20000000): 1 kHz VQF-fxp business hot path (execute)
  *   ALGO_RAM (4K @ 0x20001000): Mahony + complementary (execute)
- *   RAM (2K @ 0x20002000): .data / .bss / stack (1024B)
+ *   RAM (2K @ 0x20002000): .data / .bss / stack (768B)
  *
  * Total SRAM = 10 KB. HOT and ALGO are non-overlapping so SPI helpers in
  * HOT_RAM remain valid when Mahony/Comp run from ALGO_RAM.
  */
 ENTRY(_start)
 
-__stack_size = 1024;
+__stack_size = 768;
 PROVIDE(_stack_size = __stack_size);
 
 MEMORY
@@ -87,6 +87,11 @@ SECTIONS
     *libgcc.a:*divdi3*(.text*)
     *libgcc.a:*udivdi3*(.text*)
 
+    /* VQF fixed: LDLT in ZW Flash */
+    *(.text.zw_vqf)
+    *(.text.zw_vqf.*)
+    *(.text.vqf_ldlt*)
+
 
     . = ALIGN(4);
   } >FLASH AT>FLASH
@@ -109,8 +114,10 @@ SECTIONS
     */*/vqf_fxp.o(.text .text.*)
     */*/*/vqf_fxp.o(.text .text.*)
 
+
     *(.text.lsm6dsv_read*)
     *(.text.vqfx_*)
+    /* vqf_fixed public hot APIs use FLASH_ZW (.text.hot_ram); helpers in .text.zw_vqf */
     *(.text.platform_uart_send_euler_i16*)
     *(.text.platform_can_send_euler_i16*)
     *(.text.mdeg_to_i16*)

@@ -1,10 +1,10 @@
 # CH32V203G6U6 + LSM6DSV + multi-algo fusion
 
-面向 **CH32V203G6U6** 的裸机姿态固件：通过 **SPI** 读取 **LSM6DSV** 六轴 IMU，经可切换的 **6DOF** 融合算法输出四元数与欧拉角。默认 **VQF-fxp**（固定小数、VQF 结构；见 `Middleware/vqf-fxp/`）在 **HOT_RAM（SRAM）** 执行（启动时从 ZW Flash LMA 拷贝）；浮点 [dusking1/vqf-c](https://github.com/DusKing1/vqf-c) 源码保留但本分支不链入；可选 **Mahony** / **complementary** 从 NZW 拷入 **ALGO_RAM** 后在 SRAM 执行。算法选择持久化在 Flash 标志位。
+面向 **CH32V203G6U6** 的裸机姿态固件：通过 **SPI** 读取 **LSM6DSV** 六轴 IMU，经可切换的 **6DOF** 融合算法输出四元数与欧拉角。默认 **Full VQF fixed**（`Middleware/vqf_fixed/`，设计分域定点 6D）在 **HOT_RAM（SRAM）** 执行；`vqf-fxp` 仅为 deprecated Q16 包装（启动时从 ZW Flash LMA 拷贝）；浮点 [dusking1/vqf-c](https://github.com/DusKing1/vqf-c) 源码保留但本分支不链入；可选 **Mahony** / **complementary** 从 NZW 拷入 **ALGO_RAM** 后在 SRAM 执行。算法选择持久化在 Flash 标志位。
 
 > **Schematic note:** 原理图主控为 **AT32F423KCU7-4**；本仓库固件目标为 **CH32V203**，在 AF 允许处对齐同名网络（尤其 **LSM SPI PA4–PA7**）。UART/CAN 在 CH32 上的复用与 AT32 不同，见下表。
 
-Short English: Bare-metal CH32V203G6U6 + LSM6DSV (**SPI** mode 3) with selectable 6DOF fusion (**VQF-fxp** fixed-point default in **HOT_RAM SRAM** on `feat/vqf-fixedpoint-rv`; **Mahony** / **complementary** in **ALGO_RAM**). **1 kHz** Euler as **int16 millideg** on **USART2 binary @ 921600** (magic `A5 5B`) + **CAN1 @ 1 Mbit** (`0x321`). Algo flag in NZW @ `0x37000`.
+Short English: Bare-metal CH32V203G6U6 + LSM6DSV (**SPI** mode 3) with selectable 6DOF fusion (**vqf_fixed** Full 6D fixed-point default in **HOT_RAM SRAM** on `feat/vqf-fixedpoint-rv`; **Mahony** / **complementary** in **ALGO_RAM**). **1 kHz** Euler as **int16 millideg** on **USART2 binary @ 921600** (magic `A5 5B`) + **CAN1 @ 1 Mbit** (`0x321`). Algo flag in NZW @ `0x37000`.
 
 通信帧格式见 [docs/protocol.md](docs/protocol.md)（UART / CAN，对照 CH32V203G6U6 原理图）。
 
@@ -96,25 +96,40 @@ GNU ld **region-list overflow** (`>FLASH FLASH_NZW`) is **not** supported by thi
 
 ## Fixed-point VQF (`feat/vqf-fixedpoint-rv`)
 
-**Honesty label:** this is a **VQF-structured fixed-point** 6DOF filter inspired by [dusking1/vqf-c](https://github.com/DusKing1/vqf-c) (strapdown `gyrQuat` + inclination `accQuat` + light bias), **not** a bit-exact full Laidig VQF port (no Kalman `biasP` / rest-LP / mag path). Sources: `Middleware/vqf-fxp/`.
+**Honesty label:** progressing toward **Full 6D fixed VQF** per design doc (`/workspace/req_doc.txt` / CH32V203G6U6 VQF-C 定点化实现设计). Sources: `Middleware/vqf_fixed/`. Legacy `Middleware/vqf-fxp/` is a **deprecated Q16 wrapper**.
 
-### Q-format
+| Done | Remaining (design §19 steps 16–25) |
+|------|-------------------------------------|
+| §19.16 float VQF-C memory fixes (`FIXES.md`) | §19.24 mag / CORDIC (`VQF_FIXED_ENABLE_MAG=0`) |
+| Math / quat / DF-I biquad+residue / scaled LDLT scaffold | §19.23 real-board cycle map + tighter Flash budget |
+| updateGyr small-angle 4th-order poly + rest gyr LP | Independent **4 kHz gyro** HAODR (structure ready; still 1 kHz/1 kHz default) |
+| updateAcc LP + inclination + rest detector + rest/motion bias Kalman | **Float/fixed replay** harness (`tools/vqf_fixed_replay/` stub only) |
+| Wired 1 kHz HOT_RAM path + F25/F27 LSM helpers | Dynamic tau setters (intentionally unsupported) |
 
-| Quantity | Format | Scale |
+**Kalman accuracy vs float is unverified** until replay exists — do not claim bit-exact Laidig parity yet.
+
+### Domains (design)
+
+| Quantity | Format | Notes |
 |----------|--------|-------|
-| Quaternion wxyz | **Q30** | `1.0 = 1<<30` |
-| Gyro rates | **Q16** rad/s | `1.0 rad/s = 65536` |
-| Accel | **Q16** m/s² | `1.0 m/s² = 65536` |
-| Euler output | int32 / int16 **millideg** | `1000 ≡ 1°` |
+| Quaternion / R / unit | **F30** | `1.0 = 1<<30` |
+| Angle | **F28** | mag path later |
+| Gyro | **F25** rad/s | |
+| Acc | **F27** g | not m/s² |
+| Bias | **F29** rad/s | clip ±2 °/s |
+| P | **F18** | W as U64/F8 |
+| IIR coeff | **F30** | PC-precomputed |
 
-### LSM6DSV raw → Q16 (no float on hot path)
+Euler output remains int32/int16 **millideg**.
 
-| Axis | FS | LSB weight (SI) | Integer scale |
-|------|----|-----------------|---------------|
-| Acc (±4 g) | 0.122 mg/LSB | ≈0.0011964 m/s² | **×78** → Q16 |
-| Gyr (±2000 dps) | 70 mdps/LSB | ≈0.0012217 rad/s | **×80** → Q16 |
+### LSM6DSV raw → F25/F27 (no float on hot path)
 
-API: `lsm6dsv_read_acc_gyr_fxp()` in `Sensors/lsm6dsv/` (FLASH_ZW).
+| Axis | FS | Integer scale |
+|------|----|---------------|
+| Acc (±4 g) | 0.122 mg/LSB | **×16375** → g F27 |
+| Gyr (±2000 dps) | 70 mdps/LSB | **×40993** → rad/s F25 |
+
+API: `lsm6dsv_read_acc_gyr_fixed()` (FLASH_ZW). Legacy `*_fxp` Q16 retained for wrappers.
 
 ### RISC-V M acceleration (QingKe V4B / `rv32imac`)
 

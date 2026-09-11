@@ -9,7 +9,7 @@
  *   (Schematic UART nets are PA0/PA1 on AT32; CH32 has no USART data AF there)
  * - CAN1 Remap1: PA11=RX, PA12=TX @ 1 Mbit, std ID 0x321
  *   (Schematic CAN nets are PA2/PA3 on AT32; CH32 cannot remap CAN there)
- * - Default algo: fixed-point VQF-structured (vqf-fxp) in HOT_RAM (SRAM)
+ * - Default algo: Full VQF fixed-point (vqf_fixed) 6D in HOT_RAM (SRAM)
  * - Alternates (Mahony / complementary): NZW LMA → ALGO_RAM, execute from SRAM
  *
  * Units: gyroscope rad/s, accelerometer m/s².
@@ -24,7 +24,8 @@
 #include "flash_zw.h"
 #include "lsm6dsv.h"
 #include "fusion.h"
-#include "vqf_fxp.h"
+#include "vqf_fixed.h"
+#include "vqf_fxp.h" /* deprecated wrappers */
 #include "algo_cfg.h"
 
 #include <math.h>
@@ -101,7 +102,8 @@ FLASH_ZW static int16_t mdeg_to_i16(int32_t mdeg)
 }
 
 /**
- * Fixed-point 1 kHz body (ALGO_VQF): raw LSM → Q16 → vqfx → millideg → UART/CAN.
+ * Full VQF fixed 1 kHz body (ALGO_VQF): raw LSM → F25/F27 → vqf_fixed → millideg.
+ * Gyro update is rate-independent (structure ready for 4 kHz gyr / 1 kHz acc).
  * No soft-float / libm on this path.
  */
 FLASH_ZW static void fusion_run_1khz_fxp(lsm6dsv_t *imu)
@@ -109,7 +111,7 @@ FLASH_ZW static void fusion_run_1khz_fxp(lsm6dsv_t *imu)
     uint32_t last_ms = platform_millis();
     const uint32_t sample_period_ms = 1u;
     uint16_t seq = 0u;
-    int32_t acc_q16[3], gyr_q16[3];
+    int32_t acc_f27[3], gyr_f25[3];
     int32_t roll_m, pitch_m, yaw_m;
 
     while (1) {
@@ -119,13 +121,13 @@ FLASH_ZW static void fusion_run_1khz_fxp(lsm6dsv_t *imu)
         }
         last_ms = now;
 
-        if (lsm6dsv_read_acc_gyr_fxp(imu, acc_q16, gyr_q16) != 0) {
+        if (lsm6dsv_read_acc_gyr_fixed(imu, acc_f27, gyr_f25) != 0) {
             platform_delay_ms(1);
             continue;
         }
-        vqfx_update_gyr(gyr_q16);
-        vqfx_update_acc(acc_q16);
-        vqfx_get_euler_mdeg(&roll_m, &pitch_m, &yaw_m);
+        vqf_fixed_update_gyr_f25(gyr_f25);
+        vqf_fixed_update_acc_f27(acc_f27);
+        vqf_fixed_get_euler_mdeg(&roll_m, &pitch_m, &yaw_m);
 
         int16_t r = mdeg_to_i16(roll_m);
         int16_t p = mdeg_to_i16(pitch_m);

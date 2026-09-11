@@ -50,6 +50,13 @@ int lsm6dsv_read_acc_gyr(lsm6dsv_t *dev, float acc_mps2[3], float gyr_rads[3]);
  */
 int lsm6dsv_read_acc_gyr_fxp(lsm6dsv_t *dev, int32_t acc_q16[3], int32_t gyr_q16[3]);
 
+/**
+ * Raw → Full VQF fixed domains (no float):
+ *   acc: g F27 (0.122 mg/LSB → ×16375)
+ *   gyr: rad/s F25 (70 mdps/LSB → ×40993)
+ */
+int lsm6dsv_read_acc_gyr_fixed(lsm6dsv_t *dev, int32_t acc_g_f27[3], int32_t gyr_f25[3]);
+
 #ifdef __cplusplus
 }
 #endif

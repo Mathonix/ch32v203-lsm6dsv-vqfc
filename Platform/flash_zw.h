@@ -14,4 +14,7 @@
 
 #define FLASH_ZW __attribute__((section(".text.hot_ram")))
 
+/** Zero-wait Flash resident (not SRAM). For helpers too large for HOT_RAM. */
+#define FLASH_ZW_CODE __attribute__((section(".text.zw_vqf")))
+
 #endif /* FLASH_ZW_H */

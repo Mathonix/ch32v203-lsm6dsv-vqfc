@@ -209,3 +209,37 @@ FLASH_ZW int lsm6dsv_read_acc_gyr_fxp(lsm6dsv_t *dev, int32_t acc_q16[3], int32_
     gyr_q16[2] = (int32_t)gz * GYR_Q16_PER_LSB;
     return 0;
 }
+
+/*
+ * Full VQF fixed domains (design):
+ *   acc g F27: 0.122e-3 g/LSB * 2^27 ≈ 16374.56 → 16375
+ *   gyr rad/s F25: 70e-3 * pi/180 * 2^25 ≈ 40992.6 → 40993
+ */
+#define ACC_F27_PER_LSB  16375
+#define GYR_F25_PER_LSB  40993
+
+FLASH_ZW int lsm6dsv_read_acc_gyr_fixed(lsm6dsv_t *dev, int32_t acc_g_f27[3], int32_t gyr_f25[3])
+{
+    uint8_t raw[12];
+    if (dev == 0 || acc_g_f27 == 0 || gyr_f25 == 0) {
+        return -1;
+    }
+    if (spi_read_regs(REG_OUTX_L_G, raw, 12) != 0) {
+        return -2;
+    }
+
+    int16_t gx = le16(&raw[0]);
+    int16_t gy = le16(&raw[2]);
+    int16_t gz = le16(&raw[4]);
+    int16_t ax = le16(&raw[6]);
+    int16_t ay = le16(&raw[8]);
+    int16_t az = le16(&raw[10]);
+
+    acc_g_f27[0] = (int32_t)ax * ACC_F27_PER_LSB;
+    acc_g_f27[1] = (int32_t)ay * ACC_F27_PER_LSB;
+    acc_g_f27[2] = (int32_t)az * ACC_F27_PER_LSB;
+    gyr_f25[0] = (int32_t)gx * GYR_F25_PER_LSB;
+    gyr_f25[1] = (int32_t)gy * GYR_F25_PER_LSB;
+    gyr_f25[2] = (int32_t)gz * GYR_F25_PER_LSB;
+    return 0;
+}
