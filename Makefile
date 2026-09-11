@@ -78,7 +78,7 @@ AS_SRCS := Startup/startup_ch32v20x_D6.S
 
 OBJS := $(addprefix $(BUILD)/,$(C_SRCS:.c=.o) $(AS_SRCS:.S=.o))
 
-.PHONY: all clean flash size tree verify-zw
+.PHONY: all clean flash size tree verify-zw replay
 
 all: $(BUILD)/$(TARGET).elf $(BUILD)/$(TARGET).hex $(BUILD)/$(TARGET).bin size
 
@@ -115,3 +115,8 @@ flash: $(BUILD)/$(TARGET).elf
 
 verify-zw: $(BUILD)/$(TARGET).elf
 	@python3 scripts/verify_zw_hotpath.py $(BUILD)/$(TARGET).elf
+
+replay:
+	$(MAKE) -C tools/vqf_fixed_replay
+	./tools/vqf_fixed_replay/build/vqf_fixed_replay --static --seconds 5
+	./tools/vqf_fixed_replay/build/vqf_fixed_replay --seconds 10

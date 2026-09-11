@@ -4,18 +4,16 @@
  * Schematic board MCU is AT32F423KCU7-4; this firmware targets CH32V203 with
  * matching net names where AF coincides (SPI). See README pin table.
  * - SPI1: PA4=LSM_CS (SW), PA5=SCK, PA6=MISO, PA7=MOSI — mode 3, WHO_AM_I=0x70
- * - PB0=LSM_INT1, PB1=LSM_INT2 (inputs, unused)
+ * - PB0=LSM_INT1, PB1=LSM_INT2 (inputs, unused — STATUS poll used instead)
  * - USART2: PA2=TX, PA3=RX @ 921600 binary Euler @ 1 kHz (+ boot printf)
- *   (Schematic UART nets are PA0/PA1 on AT32; CH32 has no USART data AF there)
  * - CAN1 Remap1: PA11=RX, PA12=TX @ 1 Mbit, std ID 0x321
- *   (Schematic CAN nets are PA2/PA3 on AT32; CH32 cannot remap CAN there)
  * - Default algo: Full VQF fixed-point (vqf_fixed) 6D in HOT_RAM (SRAM)
  * - Alternates (Mahony / complementary): NZW LMA → ALGO_RAM, execute from SRAM
  *
- * Units: gyroscope rad/s, accelerometer m/s².
- * Sample rate: LSM6DSV HAODR true 1000 Hz.
+ * Sample rates (ALGO_VQF): LSM6DSV HAODR GY=4 kHz, XL=1 kHz async.
+ *   vqf_fixed_update_gyr_f25 @ 4 kHz; update_acc + UART/CAN @ 1 kHz only.
  *
- * UART command (boot window ~1.5 s, or anytime before SETALGO finishes):
+ * UART command (boot window ~1.5 s):
  *   SETALGO n\n   with n=0 VQF, 1 Mahony, 2 complementary — programs Flash flag,
  *   then soft-hint to reset (user power-cycles / NRST).
  */
@@ -71,10 +69,6 @@ FLASH_NZW static void fusion_uart_print_status(const float q[4])
 #endif
 
 /**
- * 1 kHz hot body in HOT_RAM (SRAM): IMU → vqfx → Euler i16 UART/CAN.
- * VQF callees in HOT_RAM; Mahony/Comp run from ALGO_RAM via function pointers.
- */
-/**
  * Float sample step — used by Mahony / complementary (ALGO_RAM).
  * Not used when ALGO_VQF (fixed-point path below).
  */
@@ -102,39 +96,56 @@ FLASH_ZW static int16_t mdeg_to_i16(int32_t mdeg)
 }
 
 /**
- * Full VQF fixed 1 kHz body (ALGO_VQF): raw LSM → F25/F27 → vqf_fixed → millideg.
- * Gyro update is rate-independent (structure ready for 4 kHz gyr / 1 kHz acc).
- * No soft-float / libm on this path.
+ * Full VQF fixed hot body (ALGO_VQF):
+ *   Poll STATUS GDA → read gyro F25 → update_gyr @ ~4 kHz
+ *   When XLDA: read acc F27 → update_acc → Euler → UART/CAN @ ~1 kHz
+ * No soft-float / libm on this path. INT1/INT2 unused (board may wire later).
  */
-FLASH_ZW static void fusion_run_1khz_fxp(lsm6dsv_t *imu)
+FLASH_ZW static void fusion_run_4k1k_fxp(lsm6dsv_t *imu)
 {
-    uint32_t last_ms = platform_millis();
-    const uint32_t sample_period_ms = 1u;
     uint16_t seq = 0u;
     int32_t acc_f27[3], gyr_f25[3];
     int32_t roll_m, pitch_m, yaw_m;
+    uint32_t idle_spins = 0u;
 
     while (1) {
-        uint32_t now = platform_millis();
-        if ((uint32_t)(now - last_ms) < sample_period_ms) {
+        uint8_t st = 0;
+        if (lsm6dsv_read_status(imu, &st) != 0) {
             continue;
         }
-        last_ms = now;
 
-        if (lsm6dsv_read_acc_gyr_fixed(imu, acc_f27, gyr_f25) != 0) {
-            platform_delay_ms(1);
+        if ((st & (LSM6DSV_STATUS_GDA | LSM6DSV_STATUS_XLDA)) == 0u) {
+            /* Bound busy-wait; avoid hammering SPI if IMU stuck */
+            if (++idle_spins > 100000u) {
+                idle_spins = 0u;
+            }
             continue;
         }
-        vqf_fixed_update_gyr_f25(gyr_f25);
-        vqf_fixed_update_acc_f27(acc_f27);
-        vqf_fixed_get_euler_mdeg(&roll_m, &pitch_m, &yaw_m);
+        idle_spins = 0u;
 
-        int16_t r = mdeg_to_i16(roll_m);
-        int16_t p = mdeg_to_i16(pitch_m);
-        int16_t y = mdeg_to_i16(yaw_m);
-        (void)platform_uart_send_euler_i16(seq, r, p, y);
-        (void)platform_can_send_euler_i16(seq, r, p, y);
-        seq++;
+        /* Gyro @ 4 kHz */
+        if ((st & LSM6DSV_STATUS_GDA) != 0u) {
+            if (lsm6dsv_read_gyr_fixed(imu, gyr_f25) != 0) {
+                continue;
+            }
+            vqf_fixed_update_gyr_f25(gyr_f25);
+        }
+
+        /* Accel + attitude I/O @ 1 kHz only (independent XL ODR). */
+        if ((st & LSM6DSV_STATUS_XLDA) != 0u) {
+            if (lsm6dsv_read_acc_fixed(imu, acc_f27) != 0) {
+                continue;
+            }
+            vqf_fixed_update_acc_f27(acc_f27);
+            vqf_fixed_get_euler_mdeg(&roll_m, &pitch_m, &yaw_m);
+
+            int16_t r = mdeg_to_i16(roll_m);
+            int16_t p = mdeg_to_i16(pitch_m);
+            int16_t y = mdeg_to_i16(yaw_m);
+            (void)platform_uart_send_euler_i16(seq, r, p, y);
+            (void)platform_can_send_euler_i16(seq, r, p, y);
+            seq++;
+        }
     }
 }
 
@@ -180,9 +191,8 @@ FLASH_NZW static void fusion_run_1khz_float(lsm6dsv_t *imu)
 
 FLASH_ZW void fusion_run_1khz(lsm6dsv_t *imu)
 {
-    /* Default ALGO_VQF integer path only — never returns.
-     * Mahony/Comp use fusion_run_1khz_float from main (NZW). */
-    fusion_run_1khz_fxp(imu);
+    /* Symbol name kept for verify-zw; body is 4 kHz gyr / 1 kHz acc+I/O. */
+    fusion_run_4k1k_fxp(imu);
 }
 
 /** Parse "SETALGO n" from a line buffer; returns 0 and sets *id_out on success. */
@@ -252,9 +262,9 @@ FLASH_NZW static void fusion_poll_setalgo_window(uint32_t wait_ms)
 FLASH_NZW int main(void)
 {
     platform_init();
-    platform_uart_printf("\nCH32V203 + LSM6DSV SPI + multi-algo fusion (6DOF, 1 kHz, VQF-fxp)\n");
+    platform_uart_printf("\nCH32V203 + LSM6DSV SPI + multi-algo fusion (6DOF, VQF fixed 4k/1k)\n");
     platform_uart_printf("Schematic MCU=AT32F423; this FW=CH32V203 (SPI nets match; UART/CAN AF differ)\n");
-    platform_uart_printf("SPI1 PA4=CS PA5=SCK PA6=MISO PA7=MOSI mode3; INT1/2=PB0/PB1 unused\n");
+    platform_uart_printf("SPI1 PA4=CS PA5=SCK PA6=MISO PA7=MOSI mode3; INT1/2=PB0/PB1 unused (STATUS poll)\n");
     platform_uart_printf("USART2 PA2=TX PA3=RX @ %u (RM: no USART data AF on schematic PA0/PA1)\n",
                          (unsigned)PLATFORM_UART_BAUD);
     platform_uart_printf("CAN1 Remap1 PA11/PA12 @ %u ID 0x%03X (RM: no CAN AF on schematic PA2/PA3)\n",
@@ -294,14 +304,18 @@ FLASH_NZW int main(void)
         while (1) {
         }
     }
-    platform_uart_printf("LSM6DSV SPI OK (WHO_AM_I=0x%02X, ODR=%.0f Hz HAODR)\n",
-                         LSM6DSV_WHO_AM_I_VALUE, (double)LSM6DSV_ODR_HZ);
+    platform_uart_printf("LSM6DSV SPI OK (WHO_AM_I=0x%02X, GY=%u Hz XL=%u Hz HAODR)\n",
+                         LSM6DSV_WHO_AM_I_VALUE,
+                         (unsigned)LSM6DSV_GYR_ODR_HZ,
+                         (unsigned)LSM6DSV_ACC_ODR_HZ);
 
     fusion_active->init(LSM6DSV_ODR_HZ);
-    platform_uart_printf("Fusion init @ %.0f Hz\n", (double)LSM6DSV_ODR_HZ);
     if (fusion_active_id == ALGO_VQF) {
-        platform_uart_printf("Hot path: VQF-fxp (Q30/Q16) in HOT_RAM; millideg UART A5 5B + CAN @ 1 kHz\n");
+        platform_uart_printf("Fusion init @ GY %u / XL %u Hz (vqf_fixed 4k1k coeffs)\n",
+                             (unsigned)LSM6DSV_GYR_ODR_HZ, (unsigned)LSM6DSV_ACC_ODR_HZ);
+        platform_uart_printf("Hot path: vqf_fixed in HOT_RAM; gyr@4kHz acc+UART A5 5B+CAN@1kHz\n");
     } else {
+        platform_uart_printf("Fusion init @ %.0f Hz\n", (double)LSM6DSV_ODR_HZ);
         platform_uart_printf("Hot path: algo in ALGO_RAM (SRAM); I/O+euler in ZW @ 1 kHz\n");
     }
 

@@ -42,7 +42,7 @@
 #define VQF_C1K_BIAS_W_MOTION_F8     (2560025600ull)      /* 10000100 */
 #define VQF_C1K_BIAS_W_VERT_F8       (25600256000000ull)  /* 100001000000 */
 
-/* 1/Ts for motion e: Ts=0.001 → 1000, as F0 integer scale helper */
+/* 1/Ts for motion e: Ts=0.001 → 1000 */
 #define VQF_C1K_INV_ACC_TS           (1000)
 
 #endif /* VQF_FIXED_COEFFS_1K1K_H */

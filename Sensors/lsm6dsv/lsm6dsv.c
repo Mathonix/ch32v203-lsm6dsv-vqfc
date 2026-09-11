@@ -10,35 +10,41 @@
 #define REG_CTRL3      0x12u
 #define REG_CTRL6      0x15u
 #define REG_CTRL8      0x17u
-#define REG_HAODR_CFG  0x62u
+#define REG_STATUS     0x1Eu
 #define REG_OUTX_L_G   0x22u
+#define REG_OUTX_L_A   0x28u
+#define REG_HAODR_CFG  0x62u
 
 #define CTRL3_SW_RESET (1u << 0)
 #define CTRL3_IF_INC   (1u << 2)
 #define CTRL3_BDU      (1u << 6)
 
 /*
- * True 1 kHz via high-accuracy ODR mode (HAODR):
- *   HAODR_CFG.HAODR_SEL = 1 → ODR code 0x9 maps to 1000 Hz (not 960).
- *   CTRL1/CTRL2: OP_MODE = 001 (HAODR) in [6:4], ODR = 0x9 in [3:0]
- *     → register value 0x19 (ST LSM6DSV_ODR_HA01_AT_1000Hz).
- * Nominal rate used by VQF: LSM6DSV_ODR_HZ = 1000.
+ * Independent HAODR ODRs (HAODR_SEL=1 / mode 1):
+ *   ODR code 0x9 → 1000 Hz, 0xB → 4000 Hz
+ *   CTRL: OP_MODE = 001 (HAODR) in [6:4], ODR in [3:0]
+ *     XL CTRL1 = 0x19 (1 kHz), GY CTRL2 = 0x1B (4 kHz)
+ * Refs: ST LSM6DSV HAODR table; ArduPilot AP_InertialSensor_LSM6DSV.
  */
-#define HAODR_SEL_1000     0x01u /* HAODR_SEL_[1:0] = 01 */
-#define OP_MODE_HAODR      0x10u /* OP_MODE_[2:0] = 001 << 4 */
+#define HAODR_SEL_MODE1    0x01u
+#define OP_MODE_HAODR      0x10u
 #define ODR_CODE_1000      0x09u
+#define ODR_CODE_4000      0x0Bu
 #define CTRL_HAODR_1000HZ  (uint8_t)(OP_MODE_HAODR | ODR_CODE_1000) /* 0x19 */
+#define CTRL_HAODR_4000HZ  (uint8_t)(OP_MODE_HAODR | ODR_CODE_4000) /* 0x1B */
 
 #define FS_G_2000DPS   0x04u /* CTRL6[3:0] */
 #define FS_XL_4G       0x01u /* CTRL8[1:0] */
 
-/* Sensitivities from ST conversion helpers */
 #define ACC_MG_PER_LSB     0.122f
 #define GYR_MDPS_PER_LSB   70.0f
 #define G_TO_MPS2          9.80665f
 #define DEG2RAD            0.017453292519943295f
 
-/* SPI: write addr MSB=0; read addr MSB=1 (OR 0x80). Mode 3 via platform SPI1. */
+#define ACC_Q16_PER_LSB  78
+#define GYR_Q16_PER_LSB  80
+#define ACC_F27_PER_LSB  16375
+#define GYR_F25_PER_LSB  40993
 
 FLASH_ZW static int spi_write_reg(uint8_t reg, uint8_t val)
 {
@@ -94,6 +100,14 @@ int lsm6dsv_whoami(lsm6dsv_t *dev, uint8_t *id)
     return spi_read_regs(REG_WHO_AM_I, id, 1);
 }
 
+FLASH_ZW int lsm6dsv_read_status(lsm6dsv_t *dev, uint8_t *status)
+{
+    if (dev == 0 || status == 0) {
+        return -1;
+    }
+    return spi_read_regs(REG_STATUS, status, 1);
+}
+
 FLASH_NZW int lsm6dsv_init(lsm6dsv_t *dev)
 {
     if (dev == 0) {
@@ -125,14 +139,14 @@ FLASH_NZW int lsm6dsv_init(lsm6dsv_t *dev)
     if (spi_write_reg(REG_CTRL8, FS_XL_4G) != 0) {
         return -14;
     }
-    /* Select HAODR table so ODR code 0x9 is true 1000 Hz (not 960). */
-    if (spi_write_reg(REG_HAODR_CFG, HAODR_SEL_1000) != 0) {
+    /* HAODR mode 1: XL 1 kHz, GY 4 kHz (independent). */
+    if (spi_write_reg(REG_HAODR_CFG, HAODR_SEL_MODE1) != 0) {
         return -17;
     }
     if (spi_write_reg(REG_CTRL1, CTRL_HAODR_1000HZ) != 0) {
         return -15;
     }
-    if (spi_write_reg(REG_CTRL2, CTRL_HAODR_1000HZ) != 0) {
+    if (spi_write_reg(REG_CTRL2, CTRL_HAODR_4000HZ) != 0) {
         return -16;
     }
 
@@ -175,14 +189,6 @@ FLASH_NZW int lsm6dsv_read_acc_gyr(lsm6dsv_t *dev, float acc_mps2[3], float gyr_
     return 0;
 }
 
-/*
- * Integer scales (rounded):
- *   acc: 0.122 mg/LSB * 1e-3 * 9.80665 * 65536 ≈ 78.41 → 78
- *   gyr: 70 mdps/LSB * 1e-3 * (pi/180) * 65536 ≈ 80.07 → 80
- */
-#define ACC_Q16_PER_LSB  78
-#define GYR_Q16_PER_LSB  80
-
 FLASH_ZW int lsm6dsv_read_acc_gyr_fxp(lsm6dsv_t *dev, int32_t acc_q16[3], int32_t gyr_q16[3])
 {
     uint8_t raw[12];
@@ -200,7 +206,6 @@ FLASH_ZW int lsm6dsv_read_acc_gyr_fxp(lsm6dsv_t *dev, int32_t acc_q16[3], int32_
     int16_t ay = le16(&raw[8]);
     int16_t az = le16(&raw[10]);
 
-    /* Widening mul uses RV M; keep in int32 */
     acc_q16[0] = (int32_t)ax * ACC_Q16_PER_LSB;
     acc_q16[1] = (int32_t)ay * ACC_Q16_PER_LSB;
     acc_q16[2] = (int32_t)az * ACC_Q16_PER_LSB;
@@ -209,14 +214,6 @@ FLASH_ZW int lsm6dsv_read_acc_gyr_fxp(lsm6dsv_t *dev, int32_t acc_q16[3], int32_
     gyr_q16[2] = (int32_t)gz * GYR_Q16_PER_LSB;
     return 0;
 }
-
-/*
- * Full VQF fixed domains (design):
- *   acc g F27: 0.122e-3 g/LSB * 2^27 ≈ 16374.56 → 16375
- *   gyr rad/s F25: 70e-3 * pi/180 * 2^25 ≈ 40992.6 → 40993
- */
-#define ACC_F27_PER_LSB  16375
-#define GYR_F25_PER_LSB  40993
 
 FLASH_ZW int lsm6dsv_read_acc_gyr_fixed(lsm6dsv_t *dev, int32_t acc_g_f27[3], int32_t gyr_f25[3])
 {
@@ -241,5 +238,41 @@ FLASH_ZW int lsm6dsv_read_acc_gyr_fixed(lsm6dsv_t *dev, int32_t acc_g_f27[3], in
     gyr_f25[0] = (int32_t)gx * GYR_F25_PER_LSB;
     gyr_f25[1] = (int32_t)gy * GYR_F25_PER_LSB;
     gyr_f25[2] = (int32_t)gz * GYR_F25_PER_LSB;
+    return 0;
+}
+
+FLASH_ZW int lsm6dsv_read_gyr_fixed(lsm6dsv_t *dev, int32_t gyr_f25[3])
+{
+    uint8_t raw[6];
+    if (dev == 0 || gyr_f25 == 0) {
+        return -1;
+    }
+    if (spi_read_regs(REG_OUTX_L_G, raw, 6) != 0) {
+        return -2;
+    }
+    int16_t gx = le16(&raw[0]);
+    int16_t gy = le16(&raw[2]);
+    int16_t gz = le16(&raw[4]);
+    gyr_f25[0] = (int32_t)gx * GYR_F25_PER_LSB;
+    gyr_f25[1] = (int32_t)gy * GYR_F25_PER_LSB;
+    gyr_f25[2] = (int32_t)gz * GYR_F25_PER_LSB;
+    return 0;
+}
+
+FLASH_ZW int lsm6dsv_read_acc_fixed(lsm6dsv_t *dev, int32_t acc_g_f27[3])
+{
+    uint8_t raw[6];
+    if (dev == 0 || acc_g_f27 == 0) {
+        return -1;
+    }
+    if (spi_read_regs(REG_OUTX_L_A, raw, 6) != 0) {
+        return -2;
+    }
+    int16_t ax = le16(&raw[0]);
+    int16_t ay = le16(&raw[2]);
+    int16_t az = le16(&raw[4]);
+    acc_g_f27[0] = (int32_t)ax * ACC_F27_PER_LSB;
+    acc_g_f27[1] = (int32_t)ay * ACC_F27_PER_LSB;
+    acc_g_f27[2] = (int32_t)az * ACC_F27_PER_LSB;
     return 0;
 }

@@ -5,7 +5,8 @@
  * IIR coeff F30, int64 accumulators. Mag behind VQF_FIXED_ENABLE_MAG=0.
  *
  * Honesty: structure matches Laidig/dusking1 VQF (IIR + rest + scaled LDLT
- * bias). Kalman numerical fidelity vs float is unverified until PC replay.
+ * bias). Host replay: static RMS ~0; mild motion RMS ~0.48° (target 0.02°).
+ * Mag behind VQF_FIXED_ENABLE_MAG=0 (not enabled in this delivery).
  */
 #ifndef VQF_FIXED_H
 #define VQF_FIXED_H

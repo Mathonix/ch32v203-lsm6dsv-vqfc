@@ -1,6 +1,7 @@
 /**
  * VQF backend: ALGO_VQF → Full VQF fixed-point (vqf_fixed).
- * Float vtable methods are NZW boundary only; 1 kHz path calls vqf_fixed_* directly.
+ * Float vtable methods are NZW boundary only; hot path calls vqf_fixed_* directly.
+ * Default rates: gyro 4 kHz / acc 1 kHz (matches LSM6DSV HAODR config).
  */
 #include "fusion.h"
 #include "vqf_fixed.h"
@@ -9,11 +10,13 @@
 
 FLASH_NZW void vqf_fusion_init(float sample_hz)
 {
-    uint32_t hz = 1000u;
-    if (sample_hz >= 1.0f && sample_hz < 100000.0f) {
-        hz = (uint32_t)(sample_hz + 0.5f);
-    }
-    vqf_fixed_config_t cfg = { .gyr_hz = hz, .acc_hz = hz, .mag_hz = 100u };
+    (void)sample_hz;
+    /* Independent rates: gyr_hz>=3500 selects coeffs_4k1k.h rest-gyr + dt_half. */
+    vqf_fixed_config_t cfg = {
+        .gyr_hz = 4000u,
+        .acc_hz = 1000u,
+        .mag_hz = 100u,
+    };
     vqf_fixed_init(&cfg);
 }
 

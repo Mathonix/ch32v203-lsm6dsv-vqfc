@@ -360,12 +360,15 @@ FLASH_ZW void vqf_fixed_update_acc_f27(const int32_t acc_g_f27[3])
         return;
     }
 
-    /* Inclination correction */
-    int32_t one_plus = u30[2] + VQF_F30_ONE;
-    if (one_plus < 0) {
-        one_plus = 0;
+    /* Inclination correction.
+     * one_plus = 1+u_z must be int64: u_z and 1.0 are both ~2^30, sum is 2^31
+     * which overflows signed int32 (was causing 180° flips when acc≈+Z). */
+    int64_t one_plus64 = (int64_t)u30[2] + (int64_t)VQF_F30_ONE;
+    if (one_plus64 < 0) {
+        one_plus64 = 0;
     }
-    int32_t qw = vqf_isqrt_f30(one_plus >> 1);
+    int32_t half = (int32_t)(one_plus64 >> 1); /* max 2^30, fits int32 */
+    int32_t qw = vqf_isqrt_f30(half);
     int32_t corr[4];
     const int32_t eps = VQF_F30_ONE / 100000;
     if (qw > eps) {

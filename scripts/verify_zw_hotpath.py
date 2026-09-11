@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify vqf_fixed 1 kHz hot path symbols live in HOT_RAM (SRAM @ 0x2000xxxx).
+"""Verify vqf_fixed 4 kHz gyr / 1 kHz acc hot path symbols live in HOT_RAM (SRAM @ 0x2000xxxx).
 
 Also reports ALGO_RAM placement for Mahony/Comp and that soft-float/libm are
 not in zero-wait Flash. Int64 div helpers may remain in ZW (Option B).
@@ -25,6 +25,9 @@ REQUIRED = [
     "vqf_fixed_get_quat6d_f30",
     "vqf_fixed_get_euler_mdeg",
     "lsm6dsv_read_acc_gyr_fixed",
+    "lsm6dsv_read_gyr_fixed",
+    "lsm6dsv_read_acc_fixed",
+    "lsm6dsv_read_status",
     "platform_spi_xfer",
     "platform_lsm_cs",
     "fusion_run_1khz",
@@ -154,6 +157,9 @@ def main() -> int:
         "vqf_fixed_update_gyr_f25",
         "vqf_fixed_update_acc_f27",
         "lsm6dsv_read_acc_gyr_fixed",
+        "lsm6dsv_read_gyr_fixed",
+        "lsm6dsv_read_acc_fixed",
+        "lsm6dsv_read_status",
         "platform_spi_xfer",
         "platform_lsm_cs",
         "fusion_run_1khz",
