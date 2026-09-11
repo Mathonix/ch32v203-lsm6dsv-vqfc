@@ -6,6 +6,9 @@
 
 Short English: Bare-metal CH32V203G6U6 + LSM6DSV (**SPI** mode 3) with selectable 6DOF fusion (**VQF-fxp** fixed-point default in **HOT_RAM SRAM** on `feat/vqf-fixedpoint-rv`; **Mahony** / **complementary** in **ALGO_RAM**). **1 kHz** Euler as **int16 millideg** on **USART2 binary @ 921600** (magic `A5 5B`) + **CAN1 @ 1 Mbit** (`0x321`). Algo flag in NZW @ `0x37000`.
 
+通信帧格式见 [docs/protocol.md](docs/protocol.md)（UART / CAN，对照 CH32V203G6U6 原理图）。
+
+
 仓库：https://github.com/Mathonix/ch32v203-lsm6dsv-vqfc
 
 ---
