@@ -1,27 +1,43 @@
-# vqf_fixed replay (stub)
+# vqf_fixed replay (host)
 
-Offline **float vs fixed** comparison harness (design §18). Not wired into CI yet.
+Offline **float VQF-C vs vqf_fixed** comparison at design rates (**gyro 4 kHz / acc 1 kHz**).
 
-## Intent
+## Build & run
 
-1. Feed the same IMU stream to:
-   - float `Middleware/vqf-c` (after FIXES.md patches)
-   - fixed `Middleware/vqf_fixed`
-2. Log quat6d / bias / restDetected each sample.
-3. On PC (double): geodesic angle error `2*acos(|dot(qf,qx)|)`.
+```bash
+# from repo root
+make -C tools/vqf_fixed_replay
+./tools/vqf_fixed_replay/build/vqf_fixed_replay --static --seconds 5
+./tools/vqf_fixed_replay/build/vqf_fixed_replay --seconds 10
 
-## Acceptance (design)
-
-- RMS angle error vs float &lt; 0.02 deg, p99 &lt; 0.05 deg (engineering target).
-- Until this harness exists, treat bias Kalman accuracy as **unverified**.
-
-## Suggested layout (future)
-
-```
-tools/vqf_fixed_replay/
-  host_main.c          # link both trees or call via FFI
-  sample.csv           # t, gx,gy,gz, ax,ay,az
-  compare.py           # error stats
+# or
+make replay
 ```
 
-Regenerate IIR constants with `scripts/gen_vqf_fixed_coeffs.py` when rates/tau change.
+Optional CSV (`t,gx,gy,gz,ax,ay,az` with gyr rad/s, acc m/s²), one row per gyro sample:
+
+```bash
+./tools/vqf_fixed_replay/build/vqf_fixed_replay --csv sample.csv
+```
+
+Host build defines `VQF_FIXED_HOST` so `FLASH_ZW` / `FLASH_NZW` attributes are no-ops.
+
+## Measured numbers (this machine, gcc -O2)
+
+| Scenario | Quat geodesic RMS | Max | Euler RMS (r/p/y) | vs 0.02° target |
+|----------|-------------------|-----|-------------------|-----------------|
+| `--static` 5 s (0 gyr, +1 g) | **0.000000°** | 0.000° | 0 / 0 / 0 | **PASS** |
+| mild synthetic motion 10 s | **0.480°** | 1.36° | 0.151 / 0.455 / 0.009 | **below target** |
+
+Design acceptance (Laidig-style): RMS &lt; 0.02°, p99 &lt; 0.05°. Static path matches; **motion / bias-Kalman fidelity is not yet within that envelope** — treat as engineering-grade, not bit-exact. Likely residual sources: scaled LDLT quantization, F18/F8 bias math, IIR init (mean vs float NaN-tau).
+
+## What it links
+
+- Float: `Middleware/vqf-c/vqf.c` (with local FIXES.md patches)
+- Fixed: `Middleware/vqf_fixed/*.c` + generated `vqf_fixed_coeffs_{1k1k,4k1k}.h`
+
+Regenerate coeffs after tau/rate changes:
+
+```bash
+python3 scripts/gen_vqf_fixed_coeffs.py
+```
